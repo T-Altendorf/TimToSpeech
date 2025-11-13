@@ -1,27 +1,33 @@
 .PHONY: build up down logs restart clean test-local help
 
+# Detect docker compose command (supports both docker-compose and docker compose)
+DOCKER_COMPOSE := $(shell command -v docker-compose 2> /dev/null)
+ifndef DOCKER_COMPOSE
+	DOCKER_COMPOSE := docker compose
+endif
+
 # Build the Docker image
 build:
-	docker-compose build
+	$(DOCKER_COMPOSE) build
 
 # Start the service
 up:
-	docker-compose up -d
+	$(DOCKER_COMPOSE) up -d
 
 # Stop the service
 down:
-	docker-compose down
+	$(DOCKER_COMPOSE) down
 
 # View logs
 logs:
-	docker-compose logs -f
+	$(DOCKER_COMPOSE) logs -f
 
 # Restart the service
 restart: down up
 
 # Clean up everything including volumes
 clean:
-	docker-compose down -v
+	$(DOCKER_COMPOSE) down -v
 	docker system prune -f
 
 # Run locally without Docker (for development)
