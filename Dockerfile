@@ -18,8 +18,8 @@ COPY app.py .
 # Create cache directory
 RUN mkdir -p /app/cache
 
-# Expose port
-EXPOSE 8000
+# Default port (can be overridden via environment variable)
+ENV PORT=8000
 
 # Run the application
 CMD ["python", "app.py"]

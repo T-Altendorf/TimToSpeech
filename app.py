@@ -373,4 +373,6 @@ def health():
 if __name__ == "__main__":
     log("Starting TimToSpeech service...")
     load_models()
-    app.run(host="0.0.0.0", port=8000, debug=False, threaded=True)
+    port = int(os.getenv("PORT", "8000"))
+    log(f"Starting Flask server on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

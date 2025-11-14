@@ -1,0 +1,8 @@
+# Docker Compose override for local development
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#    or: make dev
+
+services:
+  tts-service:
+    ports:
+      - "${HOST_PORT:-8000}:${PORT:-8000}"
