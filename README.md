@@ -8,7 +8,7 @@ A lightweight Docker-based Text-to-Speech (TTS) service for Kurmanji text using 
 - 🗣️ **Kurmanji TTS** - Uses Facebook's MMS TTS model for Kurmanji (Latin script)
 - 💾 **Smart Caching** - Automatically caches generated audio files to avoid regeneration
 - 🎵 **MP3 Output** - Converts audio to MP3 format for smaller file sizes
-- 📝 **Text Preprocessing** - Handles numbers, abbreviations, and punctuation restoration
+- 📝 **Text Preprocessing** - Handles numbers and abbreviations
 - 🐳 **Docker Compose** - Easy deployment with persistent volume storage
 - ⚡ **Fast Response** - Models loaded into memory at startup for quick generation
 
@@ -23,31 +23,35 @@ A lightweight Docker-based Text-to-Speech (TTS) service for Kurmanji text using 
 ### Using Docker Compose (Recommended)
 
 1. **Clone the repository:**
+
    ```bash
    git clone https://github.com/T-Altendorf/TimToSpeech.git
    cd TimToSpeech
    ```
 
 2. **Build and start the service:**
+
    ```bash
    make build
    make up
    ```
 
    Or without make:
+
    ```bash
    docker-compose build
    docker-compose up -d
    ```
 
 3. **Check the logs to ensure models are loaded:**
+
    ```bash
    make logs
    ```
 
    Wait until you see:
+
    ```
-   ✓ Punctuation model loaded successfully
    ✓ TTS model loaded successfully
    ```
 
@@ -78,25 +82,30 @@ make help        # Show all available commands
 Convert text to speech.
 
 **Query Parameters:**
+
 - `text` (required): The Kurmanji text to convert to speech
 
 **Response:**
+
 - `200 OK`: Returns MP3 audio file (from cache if available)
 - `202 Accepted`: Generation started, returns job info for polling
 - `400 Bad Request`: Missing or invalid text parameter
 
 **Example:**
+
 ```bash
 curl "http://localhost:5000/tts?text=Rojbaş" --output greeting.mp3
 ```
 
 **Long-running requests:**
 For first-time generation of complex text, the service may take time. The endpoint will:
+
 1. Return immediately with a 202 status and job_id if processing takes longer than 2 seconds
 2. Continue processing in the background even if the client disconnects
 3. Cache the result for future requests
 
 **Example with polling:**
+
 ```bash
 # Initial request (may return 202 with job_id)
 curl "http://localhost:5000/tts?text=Very%20long%20text..."
@@ -117,6 +126,7 @@ curl "http://localhost:5000/status/abc123..." --output result.mp3
 Check the status of a TTS generation job.
 
 **Response:**
+
 - `200 OK`: Returns MP3 audio file if completed
 - `202 Accepted`: Still processing
 - `404 Not Found`: Job ID not found
@@ -127,11 +137,11 @@ Check the status of a TTS generation job.
 Health check endpoint.
 
 **Response:**
+
 ```json
 {
   "status": "healthy",
-  "tts_model_loaded": true,
-  "punct_model_loaded": true
+  "tts_model_loaded": true
 }
 ```
 
@@ -146,11 +156,13 @@ cp .env.example .env
 ```
 
 **Available Variables:**
+
 - `CACHE_DIR`: Directory path for caching generated audio files (default: `/app/cache`)
 
 ### Volume Persistence
 
 The Docker Compose configuration includes a named volume (`tts-cache`) that persists generated audio files between container restarts. This means:
+
 - Cached audio files survive container restarts
 - No need to regenerate previously requested text
 - Faster response times for repeated requests
@@ -164,7 +176,6 @@ The service applies several preprocessing steps before TTS generation:
 1. **Text Normalization**: Standardizes quotation marks and apostrophes
 2. **Number Expansion**: Converts digits to Kurmanji words (e.g., "1" → "yek")
 3. **Abbreviation Expansion**: Expands common abbreviations (e.g., "NATO" → "Nato")
-4. **Punctuation Restoration**: Uses ML model to restore proper punctuation
 
 ### Caching Strategy
 
@@ -185,16 +196,19 @@ The service applies several preprocessing steps before TTS generation:
 For development without Docker:
 
 1. **Install dependencies:**
+
    ```bash
    pip install -r requirements.txt
    ```
 
 2. **Install ffmpeg** (required for MP3 conversion):
+
    - Ubuntu/Debian: `sudo apt-get install ffmpeg`
    - macOS: `brew install ffmpeg`
    - Windows: Download from [ffmpeg.org](https://ffmpeg.org/download.html)
 
 3. **Create cache directory:**
+
    ```bash
    mkdir -p cache
    export CACHE_DIR=./cache
@@ -224,22 +238,23 @@ TimToSpeech/
 ## Models Used
 
 - **TTS Model**: `facebook/mms-tts-kmr-script_latin` - Facebook's Massively Multilingual Speech model for Kurmanji
-- **Punctuation Model**: `oliverguhr/fullstop-punctuation-multilang-large` - Multilingual punctuation restoration
 
-Both models are automatically downloaded on first run and loaded into memory for fast inference.
+The TTS model is automatically downloaded on first run and loaded into memory for fast inference.
 
 ## Troubleshooting
 
 ### Models not loading
 
 If you see errors about models not loading:
-1. Check internet connection (models download from Hugging Face on first run)
-2. Ensure sufficient disk space (models are ~500MB total)
+
+1. Check internet connection (the model downloads from Hugging Face on first run)
+2. Ensure sufficient disk space (the model is ~500MB)
 3. Check logs: `make logs`
 
 ### Out of memory errors
 
 The models require significant RAM:
+
 - Increase Docker memory limit (Docker Desktop → Settings → Resources)
 - Minimum recommended: 4GB RAM
 
@@ -252,16 +267,18 @@ The models require significant RAM:
 ### Port already in use
 
 If port 5000 is already in use, modify `docker-compose.yml`:
+
 ```yaml
 ports:
-  - "5001:5000"  # Use port 5001 instead
+  - "5001:5000" # Use port 5001 instead
 ```
 
 ## License
 
 This project uses models from Hugging Face. Please check individual model licenses:
+
 - [facebook/mms-tts-kmr-script_latin](https://huggingface.co/facebook/mms-tts-kmr-script_latin)
-- [oliverguhr/fullstop-punctuation-multilang-large](https://huggingface.co/oliverguhr/fullstop-punctuation-multilang-large)
+- [facebook/mms-tts-kmr-script_latin](https://huggingface.co/facebook/mms-tts-kmr-script_latin)
 
 ## Contributing
 

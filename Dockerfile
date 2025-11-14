@@ -19,7 +19,7 @@ COPY app.py .
 RUN mkdir -p /app/cache
 
 # Expose port
-EXPOSE 5000
+EXPOSE 8000
 
 # Run the application
 CMD ["python", "app.py"]
