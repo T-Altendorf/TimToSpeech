@@ -22,6 +22,12 @@ A lightweight Docker-based Text-to-Speech (TTS) service for Kurmanji text using 
 
 ### Using Docker Compose (Recommended)
 
+The service can be run in two modes:
+- **Development mode** (with host port exposed): For local testing and development
+- **Production mode** (no host port): For deployment behind a reverse proxy/load balancer
+
+#### Development Mode (Local Testing)
+
 1. **Clone the repository:**
 
    ```bash
@@ -32,21 +38,19 @@ A lightweight Docker-based Text-to-Speech (TTS) service for Kurmanji text using 
 2. **Build and start the service:**
 
    ```bash
-   make build
-   make up
+   make dev
    ```
 
    Or without make:
 
    ```bash
-   docker-compose build
-   docker-compose up -d
+   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
    ```
 
 3. **Check the logs to ensure models are loaded:**
 
    ```bash
-   make logs
+   make dev-logs
    ```
 
    Wait until you see:
@@ -57,20 +61,45 @@ A lightweight Docker-based Text-to-Speech (TTS) service for Kurmanji text using 
 
 4. **Test the service:**
    ```bash
-   curl "http://localhost:5000/tts?text=Silav%20ji%20te%20re" --output test.mp3
+   curl "http://localhost:8000/tts?text=Silav%20ji%20te%20re" --output test.mp3
    ```
+
+#### Production Mode (Behind Reverse Proxy)
+
+For production deployments (Dokploy, Kubernetes, etc.):
+
+```bash
+make build
+make up
+```
+
+This mode only exposes the port internally (using Docker's `expose` directive), expecting an external reverse proxy or orchestrator to handle external access.
 
 ### Using Makefile Commands
 
 The project includes a Makefile for convenient operations:
 
+**Production mode (no host port exposure):**
 ```bash
 make build       # Build the Docker image
-make up          # Start the service
+make up          # Start the service (no host port)
 make down        # Stop the service
 make logs        # View service logs
 make restart     # Restart the service
 make clean       # Stop and remove volumes
+```
+
+**Development mode (with host port exposure):**
+```bash
+make dev         # Start service with host port exposed
+make dev-down    # Stop dev service
+make dev-logs    # View dev service logs
+make dev-restart # Restart dev service
+make dev-build   # Build dev image
+```
+
+**Other commands:**
+```bash
 make test-local  # Run locally without Docker (for development)
 make help        # Show all available commands
 ```
@@ -94,7 +123,7 @@ Convert text to speech.
 **Example:**
 
 ```bash
-curl "http://localhost:5000/tts?text=Rojbaş" --output greeting.mp3
+curl "http://localhost:8000/tts?text=Rojbaş" --output greeting.mp3
 ```
 
 **Long-running requests:**
@@ -108,7 +137,7 @@ For first-time generation of complex text, the service may take time. The endpoi
 
 ```bash
 # Initial request (may return 202 with job_id)
-curl "http://localhost:5000/tts?text=Very%20long%20text..."
+curl "http://localhost:8000/tts?text=Very%20long%20text..."
 
 # Response:
 # {
@@ -118,7 +147,7 @@ curl "http://localhost:5000/tts?text=Very%20long%20text..."
 # }
 
 # Poll for completion
-curl "http://localhost:5000/status/abc123..." --output result.mp3
+curl "http://localhost:8000/status/abc123..." --output result.mp3
 ```
 
 ### `GET /status/<job_id>`
@@ -158,6 +187,8 @@ cp .env.example .env
 **Available Variables:**
 
 - `CACHE_DIR`: Directory path for caching generated audio files (default: `/app/cache`)
+- `PORT`: Port inside the container (default: `8000`)
+- `HOST_PORT`: Port exposed on the host machine for local development (default: `8000`)
 
 ### Volume Persistence
 
@@ -219,21 +250,35 @@ For development without Docker:
    python app.py
    ```
 
-The service will be available at `http://localhost:5000`.
+The service will be available at `http://localhost:8000`.
 
 ### Project Structure
 
 ```
 TimToSpeech/
-├── app.py                 # Main Flask application
-├── requirements.txt       # Python dependencies
-├── Dockerfile            # Docker image definition
-├── docker-compose.yml    # Docker Compose configuration
-├── Makefile              # Convenience commands
-├── .env.example          # Environment variable template
-├── .gitignore           # Git ignore rules
-└── README.md            # This file
+├── app.py                   # Main Flask application
+├── requirements.txt         # Python dependencies
+├── Dockerfile              # Docker image definition
+├── docker-compose.yml      # Base Docker Compose configuration (production)
+├── docker-compose.dev.yml  # Development override (exposes host port)
+├── Makefile                # Convenience commands
+├── .env.example            # Environment variable template
+├── .gitignore             # Git ignore rules
+└── README.md              # This file
 ```
+
+### Docker Compose Configurations
+
+The project uses Docker Compose with two configurations:
+
+- **`docker-compose.yml`**: Base configuration for production
+  - Uses `expose` directive (no host port mapping)
+  - Suitable for deployment behind reverse proxies (Dokploy, Kubernetes, etc.)
+  
+- **`docker-compose.dev.yml`**: Development override
+  - Adds `ports` directive to expose the service on the host
+  - Combined with base config for local testing: `docker compose -f docker-compose.yml -f docker-compose.dev.yml up`
+  - Accessed via `make dev` commands
 
 ## Models Used
 
@@ -266,12 +311,19 @@ The models require significant RAM:
 
 ### Port already in use
 
-If port 5000 is already in use, modify `docker-compose.yml`:
+If port 8000 is already in use on your host, you can change it:
 
-```yaml
-ports:
-  - "5001:5000" # Use port 5001 instead
-```
+1. **For development mode**: Create or edit `.env` file and set:
+   ```bash
+   HOST_PORT=8001  # Use a different host port
+   PORT=8000       # Keep container port the same
+   ```
+
+2. **Or modify `docker-compose.dev.yml`**:
+   ```yaml
+   ports:
+     - "8001:8000" # Use port 8001 on host instead
+   ```
 
 ## License
 
