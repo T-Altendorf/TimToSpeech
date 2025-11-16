@@ -5,12 +5,13 @@ A lightweight Docker-based Text-to-Speech (TTS) service for Kurmanji text using 
 ## Features
 
 - 🎯 **Lightweight Flask-based API** - Simple and efficient web service
-- 🗣️ **Kurmanji TTS** - Uses Facebook's MMS TTS model for Kurmanji (Latin script)
+- 🗣️ **Dual TTS Engines** - Kurdish TTS API for short texts (< 150 chars), local Facebook MMS model for longer texts
 - 💾 **Smart Caching** - Automatically caches generated audio files to avoid regeneration
 - 🎵 **MP3 Output** - Converts audio to MP3 format for smaller file sizes
 - 📝 **Text Preprocessing** - Handles numbers and abbreviations
 - 🐳 **Docker Compose** - Easy deployment with persistent volume storage
 - ⚡ **Fast Response** - Models loaded into memory at startup for quick generation
+- 🔄 **Automatic Fallback** - Falls back to local model if Kurdish TTS API fails
 
 ## Prerequisites
 
@@ -100,9 +101,15 @@ curl "http://localhost:5000/tts?text=Rojbaş" --output greeting.mp3
 **Long-running requests:**
 For first-time generation of complex text, the service may take time. The endpoint will:
 
-1. Return immediately with a 202 status and job_id if processing takes longer than 2 seconds
+1. Return immediately with a 202 status and job_id if processing takes longer than the configured timeout (default 7 seconds)
 2. Continue processing in the background even if the client disconnects
 3. Cache the result for future requests
+
+**How it works:**
+
+- Texts under 150 characters use the Kurdish TTS API (https://www.kurdishtts.com/api/tts-demo)
+- Texts 150 characters or longer use the local Facebook MMS model
+- If the Kurdish TTS API fails, the service automatically falls back to the local model
 
 **Example with polling:**
 
@@ -158,6 +165,8 @@ cp .env.example .env
 **Available Variables:**
 
 - `CACHE_DIR`: Directory path for caching generated audio files (default: `/app/cache`)
+- `PORT`: Port number for the Flask service (default: `8000`)
+- `TTS_WAIT_TIMEOUT`: Maximum time in seconds to wait for TTS generation before returning a job ID for polling (default: `7.0`)
 
 ### Volume Persistence
 
@@ -168,6 +177,22 @@ The Docker Compose configuration includes a named volume (`tts-cache`) that pers
 - Faster response times for repeated requests
 
 ## Architecture
+
+### TTS Engine Selection
+
+The service intelligently selects between two TTS engines:
+
+1. **Kurdish TTS API** (`https://www.kurdishtts.com/api/tts-demo`)
+
+   - Used for texts under 150 characters
+   - Faster for short texts
+   - Automatic fallback to local model if API fails
+   - Voice: `3_speaker` with audio enhancement
+
+2. **Local Facebook MMS Model** (`facebook/mms-tts-kmr-script_latin`)
+   - Used for texts 150 characters or longer
+   - Fallback option when Kurdish TTS API is unavailable
+   - Loaded into memory at startup for fast inference
 
 ### Text Preprocessing Pipeline
 

@@ -9,6 +9,7 @@ services:
     environment:
       - CACHE_DIR=${CACHE_DIR:-/app/cache}
       - PORT=${PORT:-8000}
+      - TTS_WAIT_TIMEOUT=${TTS_WAIT_TIMEOUT:-7.0}
     volumes:
       - tts-cache:/app/cache
     restart: unless-stopped

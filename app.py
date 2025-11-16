@@ -20,12 +20,14 @@ from pydub import AudioSegment
 from threading import Thread
 import time
 import datetime
+import requests
 
 app = Flask(__name__)
 
 # Configuration
 CACHE_DIR = Path(os.getenv("CACHE_DIR", "/app/cache"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+TTS_WAIT_TIMEOUT = float(os.getenv("TTS_WAIT_TIMEOUT", "7.0"))
 
 # Global variables for models
 model = None
@@ -277,26 +279,97 @@ def generate_audio(text: str, output_path: Path):
         return False
 
 
-def generate_audio_async(job_id: str, text: str, output_path: Path):
-    """Wrapper for async audio generation"""
-    processing_jobs[job_id] = {"status": "processing", "path": None}
-    success = generate_audio(text, output_path)
-    if success:
-        processing_jobs[job_id] = {"status": "completed", "path": str(output_path)}
-    else:
-        processing_jobs[job_id] = {"status": "failed", "path": None}
-
-
 def get_cache_path(text: str) -> Path:
     """Generate cache file path based on text hash"""
     text_hash = hashlib.sha256(text.encode()).hexdigest()
     return CACHE_DIR / f"{text_hash}.mp3"
 
 
+def call_kurdish_tts_api(text: str, output_path: Path) -> bool:
+    """
+    Call the Kurdish TTS API for short texts (< 150 characters)
+
+    Args:
+        text: The text to convert to speech
+        output_path: Path where the audio file should be saved
+
+    Returns:
+        True if successful, False otherwise
+    """
+    log(f"=== Kurdish TTS API Call Started ===")
+    log(f"Input: '{text}'")
+    start_time = time.perf_counter()
+
+    try:
+        url = "https://www.kurdishtts.com/api/tts-demo"
+        payload = {
+            "text": text,
+            "dialect": "kurmanji",
+            "voice": "3_speaker",
+            "enhance_audio": True,
+        }
+
+        log(f"Calling Kurdish TTS API...")
+        response = requests.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+
+        # Save the audio response to the output path
+        with open(output_path, "wb") as f:
+            f.write(response.content)
+
+        file_size = os.path.getsize(output_path)
+        elapsed = time.perf_counter() - start_time
+
+        log(
+            f"✓ Kurdish TTS API succeeded | Size: {file_size} bytes | Time: {elapsed:.3f}s"
+        )
+        log("=== Kurdish TTS API Call Completed ===")
+        return True
+
+    except requests.exceptions.RequestException as e:
+        elapsed = time.perf_counter() - start_time
+        log(f"✗ Kurdish TTS API failed: {str(e)} | Time: {elapsed:.3f}s")
+        return False
+    except Exception as e:
+        elapsed = time.perf_counter() - start_time
+        log(f"✗ Unexpected error in Kurdish TTS API: {str(e)} | Time: {elapsed:.3f}s")
+        traceback.print_exc()
+        return False
+
+
+def generate_tts_async(job_id: str, text: str, output_path: Path, use_api: bool):
+    """
+    Wrapper for async TTS generation (either API or local model)
+
+    Args:
+        job_id: Unique identifier for this job
+        text: The text to convert to speech
+        output_path: Path where the audio file should be saved
+        use_api: If True, try Kurdish TTS API; if False, use local model
+    """
+    processing_jobs[job_id] = {"status": "processing", "path": None}
+
+    success = False
+    if use_api:
+        success = call_kurdish_tts_api(text, output_path)
+        if not success:
+            log("Kurdish TTS API failed, falling back to local model")
+            success = generate_audio(text, output_path)
+    else:
+        success = generate_audio(text, output_path)
+
+    if success:
+        processing_jobs[job_id] = {"status": "completed", "path": str(output_path)}
+    else:
+        processing_jobs[job_id] = {"status": "failed", "path": None}
+
+
 @app.route("/tts", methods=["GET"])
 def text_to_speech():
     """
     TTS endpoint - converts text to speech
+    For short texts (< 150 chars), uses Kurdish TTS API
+    For longer texts, uses local TTS model
     Query parameters:
       - text: The text to convert to speech (required)
     """
@@ -311,16 +384,23 @@ def text_to_speech():
         log(f"Cache hit for text: '{text[:50]}...'")
         return send_file(cache_path, mimetype="audio/mpeg")
 
+    # Determine whether to use API (for short texts) or local model
+    use_api = len(text) < 150
+    if use_api:
+        log(f"Text is {len(text)} characters, using Kurdish TTS API")
+    else:
+        log(f"Text is {len(text)} characters, using local TTS model")
+
     # Generate job ID
     job_id = hashlib.sha256(f"{text}{os.urandom(8).hex()}".encode()).hexdigest()[:16]
 
     # Start async generation
-    thread = Thread(target=generate_audio_async, args=(job_id, text, cache_path))
+    thread = Thread(target=generate_tts_async, args=(job_id, text, cache_path, use_api))
     thread.daemon = True
     thread.start()
 
     # Wait briefly to see if generation completes quickly
-    thread.join(timeout=7.0)
+    thread.join(timeout=TTS_WAIT_TIMEOUT)
 
     if cache_path.exists():
         # Generation completed within timeout
