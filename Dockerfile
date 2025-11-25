@@ -13,7 +13,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY app.py .
+COPY app ./app
+COPY wsgi.py .
 
 # Create cache directory
 RUN mkdir -p /app/cache
@@ -22,4 +23,4 @@ RUN mkdir -p /app/cache
 ENV PORT=8000
 
 # Run the application
-CMD ["python", "app.py"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "1", "--threads", "8", "--timeout", "120", "wsgi:app"]

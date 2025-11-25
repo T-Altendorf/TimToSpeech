@@ -37,7 +37,7 @@ clean:
 # Run locally without Docker (for development)
 test-local:
 	pip install -r requirements.txt
-	python app.py
+	python wsgi.py
 
 # Development mode commands (with host port exposure)
 dev:
