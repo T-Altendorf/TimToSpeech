@@ -29,7 +29,8 @@ def call_kurdish_tts_api(text: str, output_path: Path) -> bool:
         payload = {
             "text": text,
             "dialect": "kurmanji",
-            "voice": "kurmanji_0",
+            "voice": "kurmanji_236",
+            "model_version": "v4",
             "stream_format": "sse",
         }
 
@@ -43,33 +44,41 @@ def call_kurdish_tts_api(text: str, output_path: Path) -> bool:
         for line in response.iter_lines():
             if line:
                 decoded_line = line.decode("utf-8")
+                data_str = None
                 if decoded_line.startswith("data: "):
                     data_str = decoded_line[6:]
+                elif decoded_line.startswith("message | "):
+                    data_str = decoded_line[10:]
+                elif decoded_line.startswith("{"):
+                    data_str = decoded_line
 
-                    # Check for [DONE] or similar end markers if applicable,
-                    # though usually we just process until the stream ends.
-                    if data_str.strip() == "[DONE]":
-                        break
+                if not data_str:
+                    continue
 
-                    try:
-                        data = json.loads(data_str)
-                        event_type = data.get("type")
+                # Check for [DONE] or similar end markers if applicable,
+                # though usually we just process until the stream ends.
+                if data_str.strip() == "[DONE]":
+                    break
 
-                        if event_type == "speech.audio.delta":
-                            audio_b64 = data.get("audio")
-                            if audio_b64:
-                                audio_content += base64.b64decode(audio_b64)
+                try:
+                    data = json.loads(data_str)
+                    event_type = data.get("type")
 
-                        elif event_type == "speech.audio.done":
-                            # We could log usage stats here if needed
-                            usage = data.get("usage", {})
-                            log(f"API Usage: {usage}")
+                    if event_type == "speech.audio.delta":
+                        audio_b64 = data.get("audio")
+                        if audio_b64:
+                            audio_content += base64.b64decode(audio_b64)
 
-                    except json.JSONDecodeError:
-                        log(
-                            f"Warning: Could not decode JSON from SSE line: {data_str[:50]}..."
-                        )
-                        continue
+                    elif event_type == "speech.audio.done":
+                        # We could log usage stats here if needed
+                        usage = data.get("usage", {})
+                        log(f"API Usage: {usage}")
+
+                except json.JSONDecodeError:
+                    log(
+                        f"Warning: Could not decode JSON from SSE line: {data_str[:50]}..."
+                    )
+                    continue
 
         if not audio_content:
             log("✗ No audio content received from API")
