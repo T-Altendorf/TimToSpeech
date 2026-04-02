@@ -48,7 +48,7 @@ def call_kurdish_tts_api(text: str, output_path: Path) -> bool:
                 if decoded_line.startswith("data: "):
                     data_str = decoded_line[6:]
                 elif decoded_line.startswith("message | "):
-                    data_str = decoded_line[10:]
+                    data_str = decoded_line[len("message | ") :]
                 elif decoded_line.startswith("{"):
                     data_str = decoded_line
 
