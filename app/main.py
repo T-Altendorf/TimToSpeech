@@ -54,14 +54,29 @@ def text_to_speech():
     For longer texts, uses local TTS model
     Query parameters:
       - text: The text to convert to speech (required)
+      - force_regen: If true, delete cached audio for this text and regenerate
     """
     text = request.args.get("text", "").strip()
+    force_regen = request.args.get("force_regen", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     if not text:
         return jsonify({"error": "Please provide 'text' parameter"}), 400
 
     # Check cache
     cache_path = get_cache_path(text)
+    if force_regen and cache_path.exists():
+        try:
+            cache_path.unlink()
+            log(f"Cache invalidated for text: '{text[:50]}...'")
+        except OSError as e:
+            log(f"Failed to invalidate cache for text: '{text[:50]}...': {e}")
+            return jsonify({"error": "Failed to invalidate cache"}), 500
+
     if cache_path.exists():
         log(f"Cache hit for text: '{text[:50]}...'")
         return send_file(cache_path, mimetype="audio/mpeg")

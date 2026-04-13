@@ -118,6 +118,7 @@ Convert text to speech.
 **Query Parameters:**
 
 - `text` (required): The Kurmanji text to convert to speech
+- `force_regen` (optional): If true (`1`, `true`, `yes`, `on`), delete cached audio for this exact text and regenerate
 
 **Response:**
 
@@ -129,6 +130,16 @@ Convert text to speech.
 
 ```bash
 curl "http://localhost:8000/tts?text=Rojbaş" --output greeting.mp3
+```
+
+**Example (force regeneration):**
+
+```bash
+curl --get \
+   --data-urlencode "text=dîtin (bîn- ; dît-)" \
+   --data-urlencode "force_regen=true" \
+   "http://localhost:8000/tts" \
+   --output greeting-fresh.mp3
 ```
 
 **Long-running requests:**
@@ -217,7 +228,6 @@ The Docker Compose configuration includes a named volume (`tts-cache`) that pers
 The service intelligently selects between two TTS engines:
 
 1. **Kurdish TTS API** (`https://www.kurdishtts.com/api/tts-demo`)
-
    - Used for texts under 150 characters
    - Faster for short texts
    - Automatic fallback to local model if API fails
@@ -261,7 +271,6 @@ For development without Docker:
    ```
 
 2. **Install ffmpeg** (required for MP3 conversion):
-
    - Ubuntu/Debian: `sudo apt-get install ffmpeg`
    - macOS: `brew install ffmpeg`
    - Windows: Download from [ffmpeg.org](https://ffmpeg.org/download.html)
