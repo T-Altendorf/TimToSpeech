@@ -5,7 +5,7 @@ A lightweight Docker-based Text-to-Speech (TTS) service for Kurmanji text using 
 ## Features
 
 - 🎯 **Lightweight Flask-based API** - Simple and efficient web service
-- 🗣️ **Dual TTS Engines** - Kurdish TTS API for short texts (< 150 chars), local Facebook MMS model for longer texts
+- 🗣️ **Kurdish TTS API with parallel chunking** - long text is split on sentence boundaries, generated in parallel and merged seamlessly; local Facebook MMS model as fallback
 - 💾 **Smart Caching** - Automatically caches generated audio files to avoid regeneration
 - 🎵 **MP3 Output** - Converts audio to MP3 format for smaller file sizes
 - 📝 **Text Preprocessing** - Handles numbers and abbreviations
@@ -151,8 +151,9 @@ For first-time generation of complex text, the service may take time. The endpoi
 
 **How it works:**
 
-- Texts under 150 characters use the Kurdish TTS API (https://www.kurdishtts.com/api/tts-demo)
-- Texts 150 characters or longer use the local Facebook MMS model
+- Texts up to 150 characters go to the free Kurdish TTS endpoint (https://www.kurdishtts.com/api/tts-demo) in a single request
+- Longer texts are split on sentence boundaries and packed back into chunks of at most 150 characters, which are generated in parallel and stitched into one seamless track
+- Only a single sentence longer than 150 characters goes to the authenticated endpoint (https://www.kurdishtts.com/api/tts-proxy), which needs `KURDISH_TTS_API_KEY`
 - If the Kurdish TTS API fails, the service automatically falls back to the local model
 
 **Example with polling:**
@@ -227,15 +228,21 @@ The Docker Compose configuration includes a named volume (`tts-cache`) that pers
 
 The service intelligently selects between two TTS engines:
 
-1. **Kurdish TTS API** (`https://www.kurdishtts.com/api/tts-demo`)
-   - Used for texts under 150 characters
-   - Faster for short texts
-   - Automatic fallback to local model if API fails
-   - Voice: `3_speaker` with audio enhancement
+1. **Kurdish TTS API** — used for all text, with two endpoints
+   - Free (`/api/tts-demo`): every chunk of 150 characters or fewer. No key required.
+   - Authenticated (`/api/tts-proxy`): only sentences that are themselves longer
+     than 150 characters and so cannot be split any further. Requires
+     `KURDISH_TTS_API_KEY` (`x-api-key` header); see https://www.kurdishtts.com/docs/api
+   - Voice: `kurmanji_236`, model `v4`
+   - Chunks are generated in parallel (up to 4 at a time) and merged seamlessly:
+     each chunk is trimmed to its speech, faded to zero at both edges,
+     level-matched, and joined across a short silence, so there is no click at
+     any boundary
+   - Automatic fallback to local model if the API fails
 
 2. **Local Facebook MMS Model** (`facebook/mms-tts-kmr-script_latin`)
-   - Used for texts 150 characters or longer
-   - Fallback option when Kurdish TTS API is unavailable
+   - Fallback option when the Kurdish TTS API is unavailable, or when a long
+     sentence needs the authenticated endpoint and no API key is configured
    - Loaded into memory at startup for fast inference
 
 ### Text Preprocessing Pipeline

@@ -50,8 +50,8 @@ def generate_tts_async(job_id: str, text: str, output_path: str, use_api: bool):
 def text_to_speech():
     """
     TTS endpoint - converts text to speech
-    For short texts (< 150 chars), uses Kurdish TTS API
-    For longer texts, uses local TTS model
+    Uses the Kurdish TTS API, splitting text over 150 chars into parallel
+    chunks; falls back to the local TTS model if the API fails
     Query parameters:
       - text: The text to convert to speech (required)
       - force_regen: If true, delete cached audio for this text and regenerate
@@ -81,12 +81,9 @@ def text_to_speech():
         log(f"Cache hit for text: '{text[:50]}...'")
         return send_file(cache_path, mimetype="audio/mpeg")
 
-    # Determine whether to use API (for short texts) or local model
-    use_api = len(text) < 150
-    if use_api:
-        log(f"Text is {len(text)} characters, using Kurdish TTS API")
-    else:
-        log(f"Text is {len(text)} characters, using local TTS model")
+    # The API handles any length now - long text is split into parallel chunks
+    use_api = True
+    log(f"Text is {len(text)} characters, using Kurdish TTS API")
 
     # Generate job ID
     job_id = hashlib.sha256(f"{text}{os.urandom(8).hex()}".encode()).hexdigest()[:16]

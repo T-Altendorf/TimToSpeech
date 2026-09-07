@@ -17,3 +17,6 @@ def log(message: str):
 CACHE_DIR = Path(os.getenv("CACHE_DIR", "./cache"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 TTS_WAIT_TIMEOUT = float(os.getenv("TTS_WAIT_TIMEOUT", "7.0"))
+
+# Only needed for sentences longer than the free endpoint's 150 char limit
+KURDISH_TTS_API_KEY = os.getenv("KURDISH_TTS_API_KEY", "").strip()
