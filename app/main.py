@@ -6,14 +6,16 @@ import os
 import hashlib
 from threading import Thread
 from flask import Flask, request, send_file, jsonify
+from flask_cors import CORS
 
-from .config import log, CACHE_DIR, TTS_WAIT_TIMEOUT
+from .config import log, CACHE_DIR, TTS_WAIT_TIMEOUT, CORS_ORIGINS
 from .utils import get_cache_path
 from .tts_local import load_models, generate_audio
 from . import tts_local
 from .tts_api import call_kurdish_tts_api
 
 app = Flask(__name__)
+CORS(app, origins=CORS_ORIGINS)
 
 # Processing jobs tracker
 processing_jobs = {}

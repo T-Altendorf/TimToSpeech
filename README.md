@@ -213,6 +213,7 @@ cp .env.example .env
 - `PORT`: Port number for the Flask service (default: `8000`)
 - `TTS_WAIT_TIMEOUT`: Maximum time in seconds to wait for TTS generation before returning a job ID for polling (default: `7.0`)
 - `HOST_PORT`: Port exposed on the host machine for local development (default: `8000`)
+- `CORS_ORIGINS`: Comma-separated list of origins allowed to call the API from a browser, or `*` for any (default: `*`). Needed for web clients such as Expo web on `http://localhost:8081`; native apps are not subject to CORS.
 
 ### Volume Persistence
 

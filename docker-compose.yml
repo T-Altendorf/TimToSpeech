@@ -11,6 +11,7 @@ services:
       - PORT=${PORT:-8000}
       - TTS_WAIT_TIMEOUT=${TTS_WAIT_TIMEOUT:-7.0}
       - KURDISH_TTS_API_KEY=${KURDISH_TTS_API_KEY:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
     volumes:
       - tts-cache:/app/cache
     restart: unless-stopped
