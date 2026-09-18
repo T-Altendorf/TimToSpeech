@@ -108,7 +108,15 @@ def preprocess_text(text: str) -> str:
     return text
 
 
+# Bump when the audio pipeline changes what a clip sounds like. The tag is part
+# of the file name, so every clip made by an older pipeline stops being served
+# and is rebuilt on the next request. 2: the engine's head artifact is trimmed
+# and joins happen at true silence (2026-09-18). Older files (`<hash>.mp3`
+# without a tag) are dead weight and can be deleted: `make prune-cache`.
+AUDIO_VERSION = 2
+
+
 def get_cache_path(text: str) -> Path:
-    """Generate cache file path based on text hash"""
+    """Generate cache file path based on text hash and the audio version"""
     text_hash = hashlib.sha256(text.encode()).hexdigest()
-    return CACHE_DIR / f"{text_hash}.mp3"
+    return CACHE_DIR / f"{text_hash}.a{AUDIO_VERSION}.mp3"
