@@ -1,4 +1,4 @@
-.PHONY: build up down logs restart clean test prune-cache test-local dev dev-down dev-logs dev-restart help
+.PHONY: build up down logs restart clean test test-local dev dev-down dev-logs dev-restart help
 
 # Detect docker compose command (supports both docker-compose and docker compose)
 DOCKER_COMPOSE := $(shell command -v docker-compose 2> /dev/null)
@@ -80,7 +80,3 @@ help:
 # The merge tests (no network, no ffmpeg)
 test:
 	python -m unittest -v
-
-# Delete clips made by an older audio pipeline (file names without an .aN tag)
-prune-cache:
-	$(DOCKER_COMPOSE) $(COMPOSE_FILES) exec tts-service sh -c 'find "$${CACHE_DIR:-/app/cache}" -name "*.mp3" ! -name "*.a[0-9]*.mp3" -delete'

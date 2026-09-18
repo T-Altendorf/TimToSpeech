@@ -9,13 +9,18 @@ from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 
 from .config import log, CACHE_DIR, TTS_WAIT_TIMEOUT, CORS_ORIGINS
-from .utils import AUDIO_VERSION, get_cache_path
+from .utils import AUDIO_VERSION, get_cache_path, prune_stale_cache
 from .tts_local import load_models, generate_audio
 from . import tts_local
 from .tts_api import call_kurdish_tts_api
 
 app = Flask(__name__)
 CORS(app, origins=CORS_ORIGINS)
+
+# A new audio version retires every older clip the moment the service starts.
+_pruned = prune_stale_cache()
+if _pruned:
+    log(f"Deleted {_pruned} cached clip(s) from an older audio version")
 
 # Processing jobs tracker
 processing_jobs = {}
