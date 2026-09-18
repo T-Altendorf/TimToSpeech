@@ -18,7 +18,9 @@ class PruneTest(unittest.TestCase):
             for path in [current, other, *stale]:
                 path.write_bytes(b"x")
             with mock.patch.object(utils, "CACHE_DIR", cache):
+                self.assertEqual(utils.cache_counts(), {"current": 1, "stale": 2})
                 self.assertEqual(utils.prune_stale_cache(), 2)
+                self.assertEqual(utils.cache_counts(), {"current": 1, "stale": 0})
                 self.assertEqual(utils.prune_stale_cache(), 0)
                 self.assertEqual(utils.get_cache_path("text").parent, cache)
             self.assertTrue(current.exists())

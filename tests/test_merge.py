@@ -51,6 +51,24 @@ class TrimTest(unittest.TestCase):
         trimmed = t._trim_silence(chunk)
         self.assertGreaterEqual(len(trimmed), 20 + 80 + 600)
 
+    def test_burst_between_sentences_inside_one_clip_is_cut(self):
+        burst = _tone(15, amplitude=600.0, hz=900.0)
+        chunk = _segment(
+            _silence(65), burst, _silence(450), _tone(800),
+            _silence(960), burst, _silence(480), _tone(700), _silence(90),
+        )
+        trimmed = t._trim_silence(chunk)
+        self.assertEqual(_short_islands(trimmed), [])
+        islands = t._sound_islands(trimmed)
+        self.assertEqual(len(islands), 2)
+        pause = islands[1][0] - islands[0][1]
+        self.assertLessEqual(abs(pause - (960 + t.HEAD_PAD_MS - t.ARTIFACT_CUT_MS)), 3 * t.FRAME_MS)
+
+    def test_final_plosive_after_a_short_closure_is_kept(self):
+        plosive = _tone(20, amplitude=3000.0, hz=1200.0)
+        chunk = _segment(_silence(100), _tone(600), _silence(90), plosive, _silence(400), _tone(500))
+        self.assertEqual(len(t._sound_islands(t._trim_silence(chunk))), 3)
+
     def test_all_silence_chunk_is_left_alone(self):
         chunk = _segment(_silence(300))
         self.assertEqual(len(t._trim_silence(chunk)), len(chunk))

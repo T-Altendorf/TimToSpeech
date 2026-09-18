@@ -38,20 +38,26 @@ REQUEST_TIMEOUT = 90
 # clip it returns opens with the same ~20 ms burst at about -35 dBFS, some 60 ms
 # in, followed by roughly half a second of silence before the speech starts. A
 # plain threshold trim takes that burst for the start of speech and keeps it, so
-# every join carried a tick. The trim below works on islands of sound instead: a
-# short island with a long silence after it is an engine artifact, not speech.
+# every join carried a tick. The engine also splits long requests by sentence
+# itself and leaves the same burst, with the same silence after it, between
+# sentences inside one clip. So the clean-up works on islands of sound: a short
+# island standing alone in silence is the engine's burst, wherever it is, and
+# it is cut out together with the lead silence that follows it.
 ACTIVE_DBFS = -50.0  # a frame louder than this counts as sound
 FRAME_MS = 5
 ISLAND_BRIDGE_MS = 30  # quieter dips shorter than this stay inside one island
-ARTIFACT_MAX_MS = 60  # a leading island at most this long ...
-ARTIFACT_SILENCE_MS = 150  # ... with at least this much silence after it is dropped
+ARTIFACT_MAX_MS = 60  # an island at most this long ...
+ARTIFACT_BEFORE_MS = 150  # ... with this much silence before it (or the chunk's start) ...
+ARTIFACT_AFTER_MS = 250  # ... and this much after it is the engine's burst, not speech
+ARTIFACT_CUT_MS = 5  # the cut starts this far before the burst, inside the silence
 HEAD_PAD_MS = 15  # kept before the first speech frame, so soft onsets survive
 TAIL_PAD_MS = 40  # kept after the last speech frame, so decays are not chopped
 FADE_IN_MS = 10
 FADE_OUT_MS = 40
-# The pause between chunks. Chunks end on sentence boundaries, and the engine's
-# own lead silence (now trimmed) used to supply most of the pause.
-CHUNK_GAP_MS = 350
+# The pause between chunks. Chunks end on sentence boundaries; with the pads
+# this lands near the pause the old joins had, a little under the engine's own
+# pause between sentences (about 970 ms).
+CHUNK_GAP_MS = 600
 LEAD_IN_MS = 50  # silence before the first chunk, room for the MP3 encoder delay
 LEAD_OUT_MS = 80
 MAX_GAIN_MATCH_DB = 4.0
@@ -231,26 +237,38 @@ def _sound_islands(segment: AudioSegment) -> list:
     return islands
 
 
-def _drop_head_artifacts(islands: list) -> list:
-    """Drop leading islands too short to be speech that stand alone in silence."""
-    while len(islands) > 1:
-        (start, end), following = islands[0], islands[1]
-        if end - start > ARTIFACT_MAX_MS or following[0] - end < ARTIFACT_SILENCE_MS:
-            break
-        log(f"  dropped a {end - start}ms engine artifact at {start}ms")
-        islands = islands[1:]
-    return islands
+def _is_artifact(islands: list, index: int) -> bool:
+    """A short island alone in silence: the engine's burst, never speech."""
+    start, end = islands[index]
+    if end - start > ARTIFACT_MAX_MS or index == len(islands) - 1:
+        return False
+    before = start - islands[index - 1][1] if index else ARTIFACT_BEFORE_MS
+    after = islands[index + 1][0] - end
+    return before >= ARTIFACT_BEFORE_MS and after >= ARTIFACT_AFTER_MS
 
 
 def _trim_silence(segment: AudioSegment) -> AudioSegment:
     """Cut a chunk down to its speech: no pad silence, no engine artifact."""
-    islands = _drop_head_artifacts(_sound_islands(segment))
-    if not islands:
+    islands = _sound_islands(segment)
+    bursts = [i for i in range(len(islands)) if _is_artifact(islands, i)]
+    speech = [island for i, island in enumerate(islands) if i not in bursts]
+    if not speech:
         # An all-silence chunk has nothing to keep - leave it as it came.
         return segment
-    start = max(0, islands[0][0] - HEAD_PAD_MS)
-    end = min(len(segment), islands[-1][1] + TAIL_PAD_MS)
-    return segment[start:end]
+
+    kept = AudioSegment.empty()
+    cursor = max(0, speech[0][0] - HEAD_PAD_MS)
+    for i in bursts:
+        start = islands[i][0] - ARTIFACT_CUT_MS
+        if start <= cursor:
+            continue  # a burst before the first speech is already outside
+        # Both cut points sit in silence, so the splice cannot tick. The pause
+        # the engine left before the burst stays; its lead silence after goes.
+        kept += segment[cursor:start]
+        cursor = islands[i + 1][0] - HEAD_PAD_MS
+        log(f"  cut a {islands[i][1] - islands[i][0]}ms engine artifact at {islands[i][0]}ms")
+    end = min(len(segment), speech[-1][1] + TAIL_PAD_MS)
+    return kept + segment[cursor:end]
 
 
 def _seal_edges(segment: AudioSegment) -> AudioSegment:

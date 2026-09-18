@@ -111,9 +111,10 @@ def preprocess_text(text: str) -> str:
 # Bump when the audio pipeline changes what a clip sounds like. The tag is part
 # of the file name, so every clip made by an older pipeline stops being served
 # and is rebuilt on the next request. 2: the engine's head artifact is trimmed
-# and joins happen at true silence (2026-09-18). Older files are deleted when
+# and joins happen at true silence (2026-09-18). 3: the same burst is also cut
+# from between sentences inside one clip (2026-09-19). Older files are deleted when
 # the service starts (`prune_stale_cache`), so a deploy cleans up after itself.
-AUDIO_VERSION = 2
+AUDIO_VERSION = 3
 
 
 def get_cache_path(text: str) -> Path:
@@ -145,3 +146,10 @@ def prune_stale_cache() -> int:
         except FileNotFoundError:
             pass
     return removed
+
+
+def cache_counts() -> dict:
+    """How many cached clips are of the current audio version, and how many are not."""
+    names = [path.name for path in CACHE_DIR.glob("*.mp3")]
+    current = sum(1 for name in names if name.endswith(_cache_suffix()))
+    return {"current": current, "stale": len(names) - current}

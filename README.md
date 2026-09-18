@@ -193,7 +193,8 @@ Health check endpoint.
 ```json
 {
   "status": "healthy",
-  "audio_version": 2,
+  "audio_version": 3,
+  "cache": { "current": 120, "stale": 0 },
   "tts_model_loaded": true
 }
 ```
