@@ -9,7 +9,7 @@ from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 
 from .config import log, CACHE_DIR, TTS_WAIT_TIMEOUT, CORS_ORIGINS
-from .utils import get_cache_path
+from .utils import AUDIO_VERSION, get_cache_path
 from .tts_local import load_models, generate_audio
 from . import tts_local
 from .tts_api import call_kurdish_tts_api
@@ -141,6 +141,9 @@ def health():
     return jsonify(
         {
             "status": "healthy",
+            # Clients key their own clip cache on this, so a pipeline change
+            # here retires their old clips too.
+            "audio_version": AUDIO_VERSION,
             "tts_model_loaded": tts_local.model is not None
             and tts_local.tokenizer is not None,
         }
