@@ -53,7 +53,7 @@ class ResponseCacheTest(unittest.TestCase):
             second = t._synthesize_free("Silav")
             post.assert_not_called()
 
-        self.assertEqual(first.raw_data, second.raw_data)
+        self.assertEqual(first.audio.raw_data, second.audio.raw_data)
 
     def test_stored_body_is_byte_identical_to_upstream(self):
         body = _sse_body(b"\x33\x44" * 50)

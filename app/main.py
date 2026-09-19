@@ -9,9 +9,9 @@ from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 
 from .config import log, CACHE_DIR, TTS_WAIT_TIMEOUT, CORS_ORIGINS
-from .utils import AUDIO_VERSION, cache_counts, get_cache_path, prune_stale_cache
+from .utils import AUDIO_VERSION, cache_counts, get_cache_path, prune_stale_cache, text_hash
 from .tts_local import load_models, generate_audio
-from . import tts_local
+from . import alignment, tts_local
 from .tts_api import call_kurdish_tts_api
 
 app = Flask(__name__)
@@ -85,8 +85,16 @@ def text_to_speech():
             return jsonify({"error": "Failed to invalidate cache"}), 500
 
     if cache_path.exists():
-        log(f"Cache hit for text: '{text[:50]}...'")
-        return send_file(cache_path, mimetype="audio/mpeg")
+        if alignment.exists(text_hash(text), AUDIO_VERSION):
+            log(f"Cache hit for text: '{text[:50]}...'")
+            return send_file(cache_path, mimetype="audio/mpeg")
+        # Every clip must have a manifest (2026-09-19). One that does not is
+        # not a valid cache entry - drop it and fall through to regenerate.
+        log(f"Cached clip has no alignment manifest, regenerating: '{text[:50]}...'")
+        try:
+            cache_path.unlink()
+        except OSError:
+            pass
 
     # The API handles any length now - long text is split into parallel chunks
     use_api = True
@@ -133,6 +141,32 @@ def check_status(job_id):
         return jsonify({"error": "Audio generation failed"}), 500
     else:
         return jsonify({"status": "processing"}), 202
+
+
+@app.route("/alignment", methods=["GET"])
+def get_alignment():
+    """The saved word-for-word timing manifest for a clip, if one was written.
+
+    Additive and read-only: no existing route's response changes. The app
+    does not call this yet (2026-09-19).
+    Query parameters:
+      - text: the exact text the clip was generated from (required)
+      - audio_version: which pipeline version's manifest to read (default: current)
+    """
+    text = request.args.get("text", "").strip()
+    if not text:
+        return jsonify({"error": "Please provide 'text' parameter"}), 400
+
+    version_param = request.args.get("audio_version", "").strip()
+    try:
+        version = int(version_param) if version_param else AUDIO_VERSION
+    except ValueError:
+        return jsonify({"error": "'audio_version' must be an integer"}), 400
+
+    manifest = alignment.read(text_hash(text), version)
+    if manifest is None:
+        return jsonify({"error": "No alignment manifest for this text"}), 404
+    return jsonify(manifest)
 
 
 @app.route("/favicon.ico")

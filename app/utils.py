@@ -116,15 +116,20 @@ def preprocess_text(text: str) -> str:
 # instead of splicing raw silence, which was not true zero and could still
 # step (2026-09-19). 5: the same burst is also dropped when it trails the
 # last word, where it sat 815ms after a single word as a tick (2026-09-19).
-# Older files are deleted when the service starts
+# 6: every clip has an alignment manifest; nothing in the sound changed
+# (2026-09-19). Older files are deleted when the service starts
 # (`prune_stale_cache`), so a deploy cleans up after itself.
-AUDIO_VERSION = 5
+AUDIO_VERSION = 6
+
+
+def text_hash(text: str) -> str:
+    """The one hash a text is keyed on everywhere: the clip, the manifest."""
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def get_cache_path(text: str) -> Path:
     """Generate cache file path based on text hash and the audio version"""
-    text_hash = hashlib.sha256(text.encode()).hexdigest()
-    return CACHE_DIR / f"{text_hash}{_cache_suffix()}"
+    return CACHE_DIR / f"{text_hash(text)}{_cache_suffix()}"
 
 
 def _cache_suffix() -> str:

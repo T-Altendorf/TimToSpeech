@@ -19,7 +19,12 @@ from .config import CACHE_DIR
 RESPONSE_CACHE_DIR = CACHE_DIR / "responses"
 
 
-def _key(text: str, endpoint: str, variant: str = "") -> str:
+def key(text: str, endpoint: str, variant: str = "") -> str:
+    """The cache key for one request: the base name of its `.body` file.
+
+    Public so a caller that needs to point back at the raw response later
+    (the alignment manifest) never has to re-derive the hash itself.
+    """
     # The voice and dialect are part of what was asked of upstream: a changed
     # voice must never be answered with the old voice's response.
     text_hash = hashlib.sha256(f"{variant}\n{text}".encode()).hexdigest()
@@ -28,7 +33,7 @@ def _key(text: str, endpoint: str, variant: str = "") -> str:
 
 def read(text: str, endpoint: str, variant: str = "") -> bytes | None:
     """The raw response body from a previous identical request, or None."""
-    path = RESPONSE_CACHE_DIR / f"{_key(text, endpoint, variant)}.body"
+    path = RESPONSE_CACHE_DIR / f"{key(text, endpoint, variant)}.body"
     try:
         return path.read_bytes()
     except FileNotFoundError:
@@ -40,12 +45,12 @@ def write(
 ) -> None:
     """Save a full upstream response body and a little metadata about it."""
     RESPONSE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    key = _key(text, endpoint, variant)
-    (RESPONSE_CACHE_DIR / f"{key}.body").write_bytes(body)
+    file_key = key(text, endpoint, variant)
+    (RESPONSE_CACHE_DIR / f"{file_key}.body").write_bytes(body)
     meta = {
         "content_type": content_type,
         "chars": len(text),
         "bytes": len(body),
         "variant": variant,
     }
-    (RESPONSE_CACHE_DIR / f"{key}.meta.json").write_text(json.dumps(meta))
+    (RESPONSE_CACHE_DIR / f"{file_key}.meta.json").write_text(json.dumps(meta))

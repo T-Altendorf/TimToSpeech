@@ -8,11 +8,14 @@ import traceback
 import json
 import base64
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 import numpy as np
 from pydub import AudioSegment
-from . import response_cache
+from . import alignment, response_cache
 from .config import log, KURDISH_TTS_API_KEY
+from .utils import AUDIO_VERSION, text_hash
 
 BASE_URL = "https://www.kurdishtts.com"
 FREE_URL = f"{BASE_URL}/api/tts-demo"
@@ -33,6 +36,9 @@ MODEL_VERSION = "v4"
 # the total_duration reported by the speech.audio.done event).
 PCM_SAMPLE_RATE = 22050
 PCM_SAMPLE_WIDTH = 2
+# The authenticated endpoint's own rate when it answers JSON with timestamps
+# (its `sample_rate` field is authoritative; this is only the fallback).
+PAID_SAMPLE_RATE = 24000
 
 MAX_PARALLEL_CHUNKS = 4
 REQUEST_TIMEOUT = 90
@@ -134,25 +140,31 @@ def split_text(text: str, limit: int = FREE_CHAR_LIMIT) -> list:
     return chunks
 
 
-def _decode_sse_audio(raw_lines: list) -> bytes:
-    """Extract the concatenated PCM bytes out of a full SSE line stream.
+def _sse_data(decoded_line: str) -> str | None:
+    """The JSON payload text of one SSE line, or None if it carries none."""
+    if decoded_line.startswith("data: "):
+        return decoded_line[len("data: ") :]
+    if decoded_line.startswith("message | "):
+        return decoded_line[len("message | ") :]
+    if decoded_line.startswith("{"):
+        return decoded_line
+    return None
+
+
+def _decode_sse(raw_lines: list) -> tuple:
+    """Parse a full SSE line stream once: the PCM bytes and the last timing.
 
     Shared between a live stream and a cached one, so a cache hit is parsed
-    exactly the way a fresh response would be.
+    exactly the way a fresh response would be. The second value is the
+    `timing` object of the last event that carried one, or None.
     """
     audio_content = b""
+    timing = None
     for decoded_line in raw_lines:
         if not decoded_line:
             continue
 
-        data_str = None
-        if decoded_line.startswith("data: "):
-            data_str = decoded_line[len("data: ") :]
-        elif decoded_line.startswith("message | "):
-            data_str = decoded_line[len("message | ") :]
-        elif decoded_line.startswith("{"):
-            data_str = decoded_line
-
+        data_str = _sse_data(decoded_line)
         if not data_str or data_str.strip() == "[DONE]":
             if data_str:
                 break
@@ -171,84 +183,122 @@ def _decode_sse_audio(raw_lines: list) -> bytes:
                 audio_content += base64.b64decode(audio_b64)
         elif event_type == "speech.audio.done":
             log(f"API Usage: {data.get('usage', {})}")
-    return audio_content
+
+        event_timing = data.get("timing")
+        if event_timing and event_timing.get("words"):
+            timing = event_timing
+    return audio_content, timing
 
 
-def _synthesize_free(text: str) -> AudioSegment:
+@dataclass
+class FreeAudio:
+    audio: AudioSegment
+    words: list | None  # {word, start, end, alignment_quality, probability}, seconds
+
+
+def _fetch_free_lines(text: str) -> list:
+    """This chunk's raw SSE lines: from the response cache, or upstream."""
+    cached = response_cache.read(text, "free", CACHE_VARIANT)
+    if cached is not None:
+        return cached.decode("utf-8").split("\n")
+
+    payload = {
+        "text": text,
+        "dialect": DIALECT,
+        "voice": VOICE,
+        "model_version": MODEL_VERSION,
+        "stream_format": "sse",
+    }
+    response = requests.post(FREE_URL, json=payload, timeout=REQUEST_TIMEOUT, stream=True)
+    response.raise_for_status()
+    raw_lines = [line.decode("utf-8") for line in response.iter_lines() if line]
+    response_cache.write(
+        text, "free", "\n".join(raw_lines).encode("utf-8"), "text/event-stream", CACHE_VARIANT
+    )
+    return raw_lines
+
+
+def _synthesize_free(text: str) -> FreeAudio:
     """Synthesize one chunk via the free demo endpoint (SSE stream of PCM).
 
     A cache hit replays the full SSE body saved from a prior call, saved
     exactly as it arrived, and never touches the network.
     """
-    cached = response_cache.read(text, "free", CACHE_VARIANT)
-    if cached is not None:
-        raw_lines = cached.decode("utf-8").split("\n")
-    else:
-        payload = {
-            "text": text,
-            "dialect": DIALECT,
-            "voice": VOICE,
-            "model_version": MODEL_VERSION,
-            "stream_format": "sse",
-        }
-        response = requests.post(
-            FREE_URL, json=payload, timeout=REQUEST_TIMEOUT, stream=True
-        )
-        response.raise_for_status()
-        raw_lines = [line.decode("utf-8") for line in response.iter_lines() if line]
-        response_cache.write(
-            text,
-            "free",
-            "\n".join(raw_lines).encode("utf-8"),
-            "text/event-stream",
-            CACHE_VARIANT,
-        )
-
-    audio_content = _decode_sse_audio(raw_lines)
+    audio_content, timing = _decode_sse(_fetch_free_lines(text))
     if not audio_content:
         raise RuntimeError("No audio content received from free endpoint")
 
-    return AudioSegment(
+    audio = AudioSegment(
         data=audio_content,
         sample_width=PCM_SAMPLE_WIDTH,
         frame_rate=PCM_SAMPLE_RATE,
         channels=1,
     )
+    return FreeAudio(audio, timing.get("words") if timing else None)
 
 
-def _synthesize_paid(text: str) -> AudioSegment:
-    """Synthesize one chunk via the authenticated endpoint (returns a WAV).
+def _decode_pcm_or_wav(data: bytes, sample_rate: int) -> AudioSegment:
+    """The paid endpoint's contract says base64 PCM; a WAV body is handled
+    too, in case a response ever wraps one after all."""
+    if data[:4] == b"RIFF":
+        log("  paid endpoint returned a WAV body, not raw PCM")
+        return AudioSegment.from_file(io.BytesIO(data), format="wav")
+    return AudioSegment(data=data, sample_width=PCM_SAMPLE_WIDTH, frame_rate=sample_rate, channels=1)
 
-    A cache hit reuses the WAV bytes saved from a prior call and never
-    touches the network, so it needs no API key either.
+
+@dataclass
+class PaidAudio:
+    audio: AudioSegment
+    words: list | None  # {word, start, end}, seconds; no quality or probability
+    generation: dict | None  # collapsed, seed_used, temperature_used, retries_used, chunk_count
+    voice: str | None  # the response's own voice/speaker id, if it reports one
+
+
+def _fetch_paid_body(text: str) -> dict:
+    """This chunk's parsed JSON body: from the response cache, or upstream.
+
+    Cached under `paid_ts`, never the older plain-WAV `paid` key, so a body
+    saved before this endpoint carried timestamps is never read as JSON. A
+    cache hit needs no API key, as before.
     """
-    content = response_cache.read(text, "paid", CACHE_VARIANT)
-    if content is None:
-        if not KURDISH_TTS_API_KEY:
-            raise RuntimeError(
-                f"Chunk is {len(text)} chars (over the {FREE_CHAR_LIMIT} char free "
-                "limit) but KURDISH_TTS_API_KEY is not set"
-            )
-        payload = {
-            "text": text,
-            "speaker_id": VOICE,
-            "model_version": MODEL_VERSION,
-            "format": "wav",
-        }
-        response = requests.post(
-            PAID_URL,
-            json=payload,
-            headers={"x-api-key": KURDISH_TTS_API_KEY},
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        content = response.content
-        response_cache.write(text, "paid", content, "audio/wav", CACHE_VARIANT)
+    cached = response_cache.read(text, "paid_ts", CACHE_VARIANT)
+    if cached is not None:
+        return json.loads(cached)
 
-    if not content:
+    if not KURDISH_TTS_API_KEY:
+        raise RuntimeError(
+            f"Chunk is {len(text)} chars (over the {FREE_CHAR_LIMIT} char free "
+            "limit) but KURDISH_TTS_API_KEY is not set"
+        )
+    payload = {
+        "text": text,
+        "speaker_id": VOICE,
+        "model_version": MODEL_VERSION,
+        "include_timestamps": True,
+    }
+    response = requests.post(
+        PAID_URL, json=payload, headers={"x-api-key": KURDISH_TTS_API_KEY}, timeout=REQUEST_TIMEOUT
+    )
+    response.raise_for_status()
+    response_cache.write(text, "paid_ts", response.content, "application/json", CACHE_VARIANT)
+    return response.json()
+
+
+def _synthesize_paid(text: str) -> PaidAudio:
+    """Synthesize one chunk via the authenticated endpoint, with word
+    timestamps requested (`include_timestamps`), so the answer is JSON, not
+    a bare WAV."""
+    body = _fetch_paid_body(text)
+    if body.get("generation", {}).get("collapsed"):
+        raise RuntimeError("Authenticated endpoint reported a collapsed generation")
+
+    audio_content = base64.b64decode(body["audio"])
+    if not audio_content:
         raise RuntimeError("No audio content received from authenticated endpoint")
 
-    return AudioSegment.from_file(io.BytesIO(content), format="wav")
+    audio = _decode_pcm_or_wav(audio_content, body.get("sample_rate", PAID_SAMPLE_RATE))
+    voice = body.get("voice") or body.get("speaker_id")
+    return PaidAudio(audio, body.get("timestamps"), body.get("generation"), voice)
 
 
 def _samples(segment: AudioSegment) -> np.ndarray:
@@ -307,36 +357,56 @@ def _fade(segment: AudioSegment, ms: int, at_start: bool) -> AudioSegment:
     return segment._spawn(sealed.tobytes())
 
 
-def _trim_silence(segment: AudioSegment) -> AudioSegment:
-    """Cut a chunk down to its speech: no pad silence, no engine artifact."""
+def _trim_plan(segment: AudioSegment) -> list:
+    """The raw (start_ms, end_ms) ranges `_trim_silence` keeps, in order.
+
+    The speech island(s), padded by HEAD_PAD_MS and TAIL_PAD_MS, with any
+    engine burst cut from the middle. An all-silence chunk has nothing to
+    keep, so the plan is the whole chunk, one range.
+    """
     islands = _sound_islands(segment)
     bursts = [i for i in range(len(islands)) if _is_artifact(islands, i)]
     speech = [island for i, island in enumerate(islands) if i not in bursts]
     if not speech:
-        # An all-silence chunk has nothing to keep - leave it as it came.
-        return segment
+        return [(0, len(segment))]
 
-    kept = AudioSegment.empty()
+    ranges = []
     cursor = max(0, speech[0][0] - HEAD_PAD_MS)
     for i in bursts:
         start = islands[i][0] - ARTIFACT_CUT_MS
         if start <= cursor or start >= speech[-1][1]:
             continue  # a burst before the first or after the last speech is already outside
-        # Both cut points sit in silence, but the engine's own "silence" is
-        # not true zero: two raw slices joined there can still step. A short
-        # fade on each side, inside the margin the burst check guarantees,
-        # seals the splice the same way the clip's outer edges are sealed.
-        piece = segment[cursor:start]
-        if len(kept):
-            piece = _fade(piece, SPLICE_FADE_MS, at_start=True)
-        kept += _fade(piece, SPLICE_FADE_MS, at_start=False)
+        ranges.append((cursor, start))
         cursor = islands[i + 1][0] - HEAD_PAD_MS
         log(f"  cut a {islands[i][1] - islands[i][0]}ms engine artifact at {islands[i][0]}ms")
     end = min(len(segment), speech[-1][1] + TAIL_PAD_MS)
-    tail = segment[cursor:end]
-    if len(kept):
-        tail = _fade(tail, SPLICE_FADE_MS, at_start=True)
-    return kept + tail
+    ranges.append((cursor, end))
+    return ranges
+
+
+def _apply_trim_plan(segment: AudioSegment, ranges: list) -> AudioSegment:
+    """Cut `segment` down to `ranges`, fading each internal splice.
+
+    Both cut points of an internal splice sit in silence, but the engine's
+    own "silence" is not true zero: two raw slices joined there can still
+    step. A short fade on each side, inside the margin the burst check
+    guarantees, seals the splice the same way the clip's outer edges are.
+    """
+    kept = AudioSegment.empty()
+    last = len(ranges) - 1
+    for index, (start, end) in enumerate(ranges):
+        piece = segment[start:end]
+        if len(kept):
+            piece = _fade(piece, SPLICE_FADE_MS, at_start=True)
+        if index < last:
+            piece = _fade(piece, SPLICE_FADE_MS, at_start=False)
+        kept += piece
+    return kept
+
+
+def _trim_silence(segment: AudioSegment) -> AudioSegment:
+    """Cut a chunk down to its speech: no pad silence, no engine artifact."""
+    return _apply_trim_plan(segment, _trim_plan(segment))
 
 
 def _seal_edges(segment: AudioSegment) -> AudioSegment:
@@ -344,51 +414,122 @@ def _seal_edges(segment: AudioSegment) -> AudioSegment:
     return _fade(_fade(segment, FADE_OUT_MS, at_start=False), FADE_IN_MS, at_start=True)
 
 
-def _merge_segments(segments: list) -> AudioSegment:
+def _level_matched(prepared: list) -> list:
+    """Match levels to the first chunk so free/authenticated chunks do not step
+    in loudness. Capped, so a quiet chunk is never blown up, and never louder
+    than the chunk's own headroom - the authenticated endpoint already peaks
+    near full scale, and gaining it up would clip into audible distortion."""
+    reference_dbfs = prepared[0].dBFS
+    if not math.isfinite(reference_dbfs):
+        return prepared
+    matched = list(prepared)
+    for i, segment in enumerate(prepared[1:], start=1):
+        if not math.isfinite(segment.dBFS):
+            continue
+        gain = max(-MAX_GAIN_MATCH_DB, min(MAX_GAIN_MATCH_DB, reference_dbfs - segment.dBFS))
+        if gain > 0 and math.isfinite(segment.max_dBFS):
+            headroom = -segment.max_dBFS - CLIP_HEADROOM_DB
+            gain = min(gain, max(0.0, headroom))
+        if abs(gain) > 0.1:
+            log(f"  chunk {i + 1}: level matched by {gain:+.2f} dB")
+            matched[i] = segment.apply_gain(gain)
+    return matched
+
+
+class MergedAudio(NamedTuple):
+    audio: AudioSegment
+    chunk_starts_ms: list  # where each input chunk's kept audio starts on `audio`
+    trim_plans: list  # each input chunk's `_trim_plan` ranges, same order
+
+
+def _merge_segments(segments: list) -> MergedAudio:
     """Clean every chunk (a single one too) and join them at true silence."""
     # Chunks can come back at different rates (the free endpoint streams
     # 22050 Hz, the authenticated one 24 kHz), so normalize the format first.
     rate = max(segment.frame_rate for segment in segments)
-    prepared = [
-        _trim_silence(segment.set_frame_rate(rate).set_channels(1).set_sample_width(2))
+    normalized = [
+        segment.set_frame_rate(rate).set_channels(1).set_sample_width(2)
         for segment in segments
     ]
-
-    # Match levels to the first chunk so free/authenticated chunks do not step
-    # in loudness. Capped, so a quiet chunk is never blown up, and never louder
-    # than the chunk's own headroom - the authenticated endpoint already peaks
-    # near full scale, and gaining it up would clip into audible distortion.
-    reference_dbfs = prepared[0].dBFS
-    if math.isfinite(reference_dbfs):
-        for i, segment in enumerate(prepared[1:], start=1):
-            if not math.isfinite(segment.dBFS):
-                continue
-            gain = max(-MAX_GAIN_MATCH_DB, min(MAX_GAIN_MATCH_DB, reference_dbfs - segment.dBFS))
-            if gain > 0 and math.isfinite(segment.max_dBFS):
-                headroom = -segment.max_dBFS - CLIP_HEADROOM_DB
-                gain = min(gain, max(0.0, headroom))
-            if abs(gain) > 0.1:
-                log(f"  chunk {i + 1}: level matched by {gain:+.2f} dB")
-                prepared[i] = segment.apply_gain(gain)
+    plans = [_trim_plan(segment) for segment in normalized]
+    prepared = _level_matched(
+        [_apply_trim_plan(segment, plan) for segment, plan in zip(normalized, plans)]
+    )
 
     gap = AudioSegment.silent(duration=CHUNK_GAP_MS, frame_rate=rate)
     combined = AudioSegment.silent(duration=LEAD_IN_MS, frame_rate=rate)
+    starts = []
     for index, segment in enumerate(prepared):
-        combined += (gap if index else AudioSegment.empty()) + _seal_edges(segment)
-    return combined + AudioSegment.silent(duration=LEAD_OUT_MS, frame_rate=rate)
+        if index:
+            combined += gap
+        starts.append(len(combined))
+        combined += _seal_edges(segment)
+    combined += AudioSegment.silent(duration=LEAD_OUT_MS, frame_rate=rate)
+    return MergedAudio(combined, starts, plans)
 
 
-def _synthesize_chunk(index: int, text: str) -> AudioSegment:
+@dataclass
+class ChunkAudio:
+    index: int
+    text: str
+    endpoint: str  # "free" or "paid" - the manifest's name for it
+    response_key: str  # the response_cache key the raw body is under
+    audio: AudioSegment
+    words: list | None
+    generation: dict | None = None
+    voice: str | None = None  # only set when the response itself reported one
+
+
+def _synthesize_chunk(index: int, text: str) -> ChunkAudio:
     """Route one chunk to the free or authenticated endpoint by length."""
     use_paid = len(text) > FREE_CHAR_LIMIT
-    endpoint = "authenticated" if use_paid else "free"
-    log(f"  chunk {index + 1}: {len(text)} chars via {endpoint} endpoint")
+    log(f"  chunk {index + 1}: {len(text)} chars via {'authenticated' if use_paid else 'free'} endpoint")
 
     start = time.perf_counter()
-    segment = _synthesize_paid(text) if use_paid else _synthesize_free(text)
+    generation = None
+    voice = None
+    if use_paid:
+        result = _synthesize_paid(text)
+        audio, words, generation, voice = result.audio, result.words, result.generation, result.voice
+        cache_key = response_cache.key(text, "paid_ts", CACHE_VARIANT)
+    else:
+        result = _synthesize_free(text)
+        audio, words = result.audio, result.words
+        cache_key = response_cache.key(text, "free", CACHE_VARIANT)
     elapsed = time.perf_counter() - start
-    log(f"  chunk {index + 1}: done in {elapsed:.3f}s ({len(segment)}ms audio)")
-    return segment
+    log(f"  chunk {index + 1}: done in {elapsed:.3f}s ({len(audio)}ms audio)")
+
+    return ChunkAudio(index, text, "paid" if use_paid else "free", cache_key, audio, words, generation, voice)
+
+
+def _write_alignment(text: str, chunk_results: list, merged: MergedAudio) -> None:
+    """Build and save this clip's alignment manifest. Never raises: a
+    manifest problem must never fail the request that made the clip."""
+    try:
+        chunk_infos = [
+            {
+                "index": result.index,
+                "text": result.text,
+                "endpoint": result.endpoint,
+                "response_key": result.response_key,
+                "raw_ms": len(result.audio),
+                "plan": merged.trim_plans[i],
+                "chunk_start_ms": merged.chunk_starts_ms[i],
+                "words": result.words,
+                "generation": result.generation,
+                "voice": result.voice,
+            }
+            for i, result in enumerate(chunk_results)
+        ]
+        manifest = alignment.build(
+            text, text_hash(text), AUDIO_VERSION, CACHE_VARIANT, len(merged.audio), chunk_infos
+        )
+        alignment.write(text_hash(text), AUDIO_VERSION, manifest)
+    except Exception as error:
+        # Loud: every clip must have a manifest. The clip itself still
+        # reaches this request; a cache read without a manifest is not
+        # treated as a hit, so the next request regenerates it clean.
+        log(f"✗ Could not write alignment manifest for this clip: {error}")
 
 
 def call_kurdish_tts_api(text: str, output_path: Path) -> bool:
@@ -428,22 +569,23 @@ def call_kurdish_tts_api(text: str, output_path: Path) -> bool:
             return False
 
         if len(chunks) == 1:
-            segments = [_synthesize_chunk(0, chunks[0])]
+            chunk_results = [_synthesize_chunk(0, chunks[0])]
         else:
             workers = min(len(chunks), MAX_PARALLEL_CHUNKS)
             log(f"Generating {len(chunks)} chunks with {workers} parallel workers")
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 # executor.map preserves input order and re-raises failures.
-                segments = list(executor.map(_synthesize_chunk, range(len(chunks)), chunks))
+                chunk_results = list(executor.map(_synthesize_chunk, range(len(chunks)), chunks))
 
-        combined = _merge_segments(segments)
-        combined.export(str(output_path), format="mp3", bitrate="128k")
+        merged = _merge_segments([result.audio for result in chunk_results])
+        merged.audio.export(str(output_path), format="mp3", bitrate="128k")
+        _write_alignment(text, chunk_results, merged)
 
         file_size = os.path.getsize(output_path)
         elapsed = time.perf_counter() - start_time
         log(
             f"✓ Kurdish TTS API succeeded | Chunks: {len(chunks)} | "
-            f"Size: {file_size} bytes | Audio: {len(combined) / 1000:.2f}s | "
+            f"Size: {file_size} bytes | Audio: {len(merged.audio) / 1000:.2f}s | "
             f"Time: {elapsed:.3f}s"
         )
         log("=== Kurdish TTS API Call Completed ===")

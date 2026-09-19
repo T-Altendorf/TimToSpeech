@@ -105,7 +105,7 @@ class TrimTest(unittest.TestCase):
         self.assertEqual(_short_islands(trimmed), [])
         expected = 405 + t.HEAD_PAD_MS + t.TAIL_PAD_MS
         self.assertLessEqual(abs(len(trimmed) - expected), 2 * t.FRAME_MS)
-        self.assertEqual(_short_islands(t._merge_segments([chunk])), [])
+        self.assertEqual(_short_islands(t._merge_segments([chunk]).audio), [])
 
     def test_final_stop_release_at_the_end_of_a_word_is_kept(self):
         # "dest", "kitêb": the release follows its closure within about 110ms.
@@ -134,7 +134,7 @@ class SealTest(unittest.TestCase):
 
 class MergeTest(unittest.TestCase):
     def test_join_is_true_silence_and_carries_no_artifact(self):
-        merged = t._merge_segments([_engine_chunk(900), _engine_chunk(700)])
+        merged = t._merge_segments([_engine_chunk(900), _engine_chunk(700)]).audio
         self.assertEqual(_short_islands(merged), [])
         islands = t._sound_islands(merged)
         self.assertEqual(len(islands), 2)
@@ -145,15 +145,62 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(np.abs(middle).max(), 0)
 
     def test_single_chunk_is_cleaned_too(self):
-        merged = t._merge_segments([_engine_chunk(800)])
+        merged = t._merge_segments([_engine_chunk(800)]).audio
         self.assertEqual(_short_islands(merged), [])
         self.assertEqual(len(t._sound_islands(merged)), 1)
 
     def test_mixed_rates_join_at_the_higher_rate(self):
         other = _engine_chunk(600).set_frame_rate(24000)
-        merged = t._merge_segments([_engine_chunk(600), other])
+        merged = t._merge_segments([_engine_chunk(600), other]).audio
         self.assertEqual(merged.frame_rate, 24000)
         self.assertEqual(_short_islands(merged), [])
+
+
+def _two_sentence_chunk() -> AudioSegment:
+    burst = _tone(15, amplitude=600.0, hz=900.0)
+    return _segment(
+        _silence(65), burst, _silence(450), _tone(800),
+        _silence(960), burst, _silence(480), _tone(700), _silence(90),
+    )
+
+
+class PlanTest(unittest.TestCase):
+    def test_plan_applied_matches_trim_silence(self):
+        for chunk in [_engine_chunk(900), _segment(_silence(300)), _two_sentence_chunk()]:
+            plan = t._trim_plan(chunk)
+            applied = t._apply_trim_plan(chunk, plan)
+            self.assertEqual(applied.raw_data, t._trim_silence(chunk).raw_data)
+
+    def test_all_silence_plan_is_the_whole_chunk(self):
+        chunk = _segment(_silence(300))
+        self.assertEqual(t._trim_plan(chunk), [(0, len(chunk))])
+
+    def test_plan_ranges_are_what_the_audio_shows(self):
+        plan = t._trim_plan(_engine_chunk(900))
+        self.assertEqual(len(plan), 1)
+        start, end = plan[0]
+        kept_ms = end - start
+        expected = 900 + t.HEAD_PAD_MS + t.TAIL_PAD_MS
+        self.assertLessEqual(abs(kept_ms - expected), 2 * t.FRAME_MS)
+
+    def test_plan_has_two_ranges_around_a_mid_burst(self):
+        plan = t._trim_plan(_two_sentence_chunk())
+        self.assertEqual(len(plan), 2)
+        # Each range is ordered and non-empty, and there is a real gap
+        # between them: the second burst falls in neither.
+        for start, end in plan:
+            self.assertLess(start, end)
+        self.assertGreater(plan[1][0], plan[0][1])
+
+
+class MergeStartsTest(unittest.TestCase):
+    def test_chunk_starts_land_after_lead_in_and_gap(self):
+        merged = t._merge_segments([_engine_chunk(900), _engine_chunk(700)])
+        self.assertEqual(len(merged.chunk_starts_ms), 2)
+        self.assertEqual(merged.chunk_starts_ms[0], t.LEAD_IN_MS)
+        first_kept_ms = len(t._trim_silence(_engine_chunk(900)))
+        expected_second = t.LEAD_IN_MS + first_kept_ms + t.CHUNK_GAP_MS
+        self.assertEqual(merged.chunk_starts_ms[1], expected_second)
 
 
 if __name__ == "__main__":

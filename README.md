@@ -193,10 +193,31 @@ Health check endpoint.
 ```json
 {
   "status": "healthy",
-  "audio_version": 5,
+  "audio_version": 6,
   "cache": { "current": 120, "stale": 0 },
   "tts_model_loaded": true
 }
+```
+
+### `GET /alignment`
+
+The word-for-word alignment manifest for a clip already generated (see
+[Alignment Manifest](#alignment-manifest)). Additive and read-only: the app
+does not call it yet.
+
+**Query Parameters:**
+
+- `text` (required): the exact text the clip was generated from
+- `audio_version` (optional): which pipeline version's manifest to read, default the current one
+
+**Response:**
+
+- `200 OK`: the manifest, as JSON
+- `400 Bad Request`: missing `text`, or `audio_version` is not an integer
+- `404 Not Found`: no manifest for this text (and version)
+
+```bash
+curl "http://localhost:8000/alignment?text=Rojbaş"
 ```
 
 ## Configuration
@@ -236,7 +257,15 @@ The service intelligently selects between two TTS engines:
    - Authenticated (`/api/tts-proxy`): only sentences that are themselves longer
      than 150 characters and so cannot be split any further. Requires
      `KURDISH_TTS_API_KEY` (`x-api-key` header); see https://www.kurdishtts.com/docs/api
-   - Voice: `kurmanji_236`, model `v4`
+   - Voice: `kurmanji_236`, model `v4` - the same two constants back both the
+     free `voice` field and the authenticated `speaker_id` field, so the two
+     endpoints can never answer in different voices
+   - The authenticated request also sends `include_timestamps: true`, so its
+     answer is JSON (base64 PCM, `timestamps`, `sample_rate`, `generation`),
+     not a bare WAV; `format` is not sent, since the contract ignores it once
+     timestamps are requested. A `generation.collapsed: true` answer is
+     treated as a failed generation even on HTTP 200, the same as a network
+     error
    - Chunks are generated in parallel (up to 4 at a time) and merged seamlessly:
      each chunk is trimmed to its speech, faded to zero at both edges,
      level-matched, and joined across a short silence, so there is no click at
@@ -266,17 +295,83 @@ The service applies several preprocessing steps before TTS generation:
 
 - Audio files are cached using SHA-256 hash of the input text
 - Cache directory is persisted via Docker volume
-- Identical requests return cached files instantly
+- Identical requests return cached files instantly, but only once a clip has
+  its alignment manifest (see below) - a cached mp3 whose manifest is
+  missing is not treated as a hit, it is dropped and regenerated
 - The full upstream response for each chunk sent to the Kurdish TTS API - the
-  raw SSE body from the free endpoint, the raw WAV bytes from the
-  authenticated one - is also kept, at `<CACHE_DIR>/responses/<sha256 of the
-  dialect, the voice and that chunk's text>.<free|paid>.body`, with a
-  `.meta.json` sidecar (content type, size, dialect and voice). The key never
-  includes `AUDIO_VERSION`, so a
+  raw SSE body from the free endpoint, the raw JSON body (with timestamps)
+  from the authenticated one - is also kept, at `<CACHE_DIR>/responses/<sha256
+  of the dialect, the voice and that chunk's text>.<free|paid_ts>.body`, with
+  a `.meta.json` sidecar (content type, size, dialect and voice). A response
+  saved before the authenticated endpoint carried timestamps is under the
+  older `paid` key (a bare WAV) and is never read as JSON; a new `paid_ts`
+  body is written instead. The key never includes `AUDIO_VERSION`, so a
   pipeline change never invalidates it, and a repeat chunk is parsed from
-  disk without a second call upstream. Nothing in the API reads it back today
-  - it is there for the alignment and timing data upstream sends alongside
-  the audio, which the pipeline otherwise discards.
+  disk without a second call upstream.
+
+### Alignment Manifest
+
+Every clip gets a manifest the moment it is generated, at
+`<CACHE_DIR>/alignments/<sha256 of the text>.a<AUDIO_VERSION>.json`. It
+records, per chunk of the request, how the raw engine audio was cut down to
+what the clip plays, so a raw engine word time (seconds, on the engine's own
+timeline) can be found again on the clip's own timeline - the PCM before MP3
+encoding, so an MP3 decoder's own start-up delay is not part of it. The
+50 ms lead-in silence before the first chunk is part of `clip_start_ms` like
+everything else.
+
+```json
+{
+  "schema": 1,
+  "audio_version": 6,
+  "text": "...",
+  "variant": "kurmanji/kurmanji_236",
+  "clip_ms": 4210,
+  "timeline": "pcm_before_mp3_encoding",
+  "chunks": [
+    {
+      "index": 0,
+      "text": "...",
+      "endpoint": "free",
+      "response_key": "<sha256>.free",
+      "raw_ms": 1830,
+      "pieces": [{ "raw_start_ms": 515, "raw_end_ms": 1470, "clip_start_ms": 50 }],
+      "words": [
+        {
+          "word": "silav",
+          "start_ms": 50,
+          "end_ms": 340,
+          "raw_start_ms": 515,
+          "raw_end_ms": 805,
+          "alignment_quality": 0.92,
+          "probability": 0.98
+        }
+      ],
+      "generation": null,
+      "voice": null
+    }
+  ]
+}
+```
+
+A raw time inside a kept piece maps by a straight shift; a raw time in a cut
+region (the engine's burst, the silence around it) clamps to the nearest kept
+edge. `words` is `null` only for a chunk whose response truly had none;
+the authenticated endpoint's words have `alignment_quality` and `probability`
+always `null` (its contract has neither), and carry the endpoint's own
+`generation` info (`collapsed`, `seed_used`, `temperature_used`,
+`retries_used`, `chunk_count`) on the chunk. `response_key` is the same key
+the response cache uses, so the raw upstream body is always found again.
+
+A manifest is never pruned; writing one never fails the request that
+generated the clip - a write failure is logged loudly and the clip is served
+anyway, but the mp3 is then a cache miss on the next request (above), so it
+is generated clean.
+
+`GET /alignment?text=...&audio_version=N` returns a manifest as JSON, or
+`404` if there is not one (`audio_version` is optional, default the current
+one). Additive and read-only: no existing route's response changes by a
+byte, and the app does not call it yet.
 
 ### Async Processing
 
