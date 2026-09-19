@@ -279,9 +279,16 @@ def _sound_islands(segment: AudioSegment) -> list:
 def _is_artifact(islands: list, index: int) -> bool:
     """A short island alone in silence: the engine's burst, never speech."""
     start, end = islands[index]
-    if end - start > ARTIFACT_MAX_MS or index == len(islands) - 1:
+    if end - start > ARTIFACT_MAX_MS or len(islands) == 1:
         return False
     before = start - islands[index - 1][1] if index else ARTIFACT_BEFORE_MS
+    if index == len(islands) - 1:
+        # The tail's mirror of the head burst (measured 2026-09-19 on the
+        # single word "av": a 5ms tick 815ms after the word). A real final
+        # stop release is short too, but it follows its closure within about
+        # 110ms ("dest", "kitêb"), so the long silence on the speech side is
+        # what tells them apart.
+        return before >= ARTIFACT_AFTER_MS
     after = islands[index + 1][0] - end
     return before >= ARTIFACT_BEFORE_MS and after >= ARTIFACT_AFTER_MS
 
@@ -313,8 +320,8 @@ def _trim_silence(segment: AudioSegment) -> AudioSegment:
     cursor = max(0, speech[0][0] - HEAD_PAD_MS)
     for i in bursts:
         start = islands[i][0] - ARTIFACT_CUT_MS
-        if start <= cursor:
-            continue  # a burst before the first speech is already outside
+        if start <= cursor or start >= speech[-1][1]:
+            continue  # a burst before the first or after the last speech is already outside
         # Both cut points sit in silence, but the engine's own "silence" is
         # not true zero: two raw slices joined there can still step. A short
         # fade on each side, inside the margin the burst check guarantees,

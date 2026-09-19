@@ -193,7 +193,7 @@ Health check endpoint.
 ```json
 {
   "status": "healthy",
-  "audio_version": 4,
+  "audio_version": 5,
   "cache": { "current": 120, "stale": 0 },
   "tts_model_loaded": true
 }
@@ -243,6 +243,10 @@ The service intelligently selects between two TTS engines:
      any boundary. A burst the engine leaves between sentences inside one
      chunk is cut out too; the cut itself is faded a few ms on each side,
      since the engine's own "silence" carries a little noise, not true zero
+   - The same burst can trail the last word of a clip, a single word too
+     (a 5 ms tick some 800 ms after the word). It is dropped with the silence
+     before it; a real final stop release follows its closure within about
+     110 ms and is kept
    - Automatic fallback to local model if the API fails
 
 2. **Local Facebook MMS Model** (`facebook/mms-tts-kmr-script_latin`)

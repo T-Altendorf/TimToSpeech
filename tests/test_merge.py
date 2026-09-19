@@ -95,6 +95,28 @@ class TrimTest(unittest.TestCase):
         chunk = _segment(_silence(100), _tone(600), _silence(90), plosive, _silence(400), _tone(500))
         self.assertEqual(len(t._sound_islands(t._trim_silence(chunk))), 3)
 
+    def test_tail_burst_after_a_single_word_is_dropped(self):
+        # Measured 2026-09-19 on the single word "av": the head burst, the
+        # word, then 815ms of silence and a 5ms tick before the clip ends.
+        tick = _tone(5, amplitude=525.0, hz=900.0)
+        head = _tone(15, amplitude=600.0, hz=900.0)
+        chunk = _segment(_silence(65), head, _hum(555), _tone(405), _hum(815), tick, _hum(100))
+        trimmed = t._trim_silence(chunk)
+        self.assertEqual(_short_islands(trimmed), [])
+        expected = 405 + t.HEAD_PAD_MS + t.TAIL_PAD_MS
+        self.assertLessEqual(abs(len(trimmed) - expected), 2 * t.FRAME_MS)
+        self.assertEqual(_short_islands(t._merge_segments([chunk])), [])
+
+    def test_final_stop_release_at_the_end_of_a_word_is_kept(self):
+        # "dest", "kitêb": the release follows its closure within about 110ms.
+        release = _tone(30, amplitude=600.0, hz=1200.0)
+        chunk = _segment(_silence(80), _tone(375), _hum(105), release, _hum(80))
+        self.assertEqual(len(t._sound_islands(t._trim_silence(chunk))), 2)
+
+    def test_a_clip_that_is_one_short_sound_is_kept(self):
+        chunk = _segment(_silence(300), _tone(40), _silence(300))
+        self.assertEqual(len(t._sound_islands(t._trim_silence(chunk))), 1)
+
     def test_all_silence_chunk_is_left_alone(self):
         chunk = _segment(_silence(300))
         self.assertEqual(len(t._trim_silence(chunk)), len(chunk))
