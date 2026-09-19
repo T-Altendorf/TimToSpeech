@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import numpy as np
 from pydub import AudioSegment
+from . import response_cache
 from .config import log, KURDISH_TTS_API_KEY
 
 BASE_URL = "https://www.kurdishtts.com"
@@ -54,6 +55,13 @@ HEAD_PAD_MS = 15  # kept before the first speech frame, so soft onsets survive
 TAIL_PAD_MS = 40  # kept after the last speech frame, so decays are not chopped
 FADE_IN_MS = 10
 FADE_OUT_MS = 40
+# Measured on a live burst cut (2026-09-19): the engine's own "silence" is not
+# true zero, so two raw slices joined at a burst cut can still step - up to
+# 125 of 32768 on a real clip, an audible tick right where a sentence ends.
+# Both cut points sit inside the silence margin the burst check already
+# guarantees (150ms before, 250ms after), so a few ms of fade fits with room
+# to spare and never touches real speech.
+SPLICE_FADE_MS = 5
 # The pause between chunks. Chunks end on sentence boundaries; with the pads
 # this lands near the pause the old joins had, a little under the engine's own
 # pause between sentences (about 970 ms).
@@ -124,27 +132,17 @@ def split_text(text: str, limit: int = FREE_CHAR_LIMIT) -> list:
     return chunks
 
 
-def _synthesize_free(text: str) -> AudioSegment:
-    """Synthesize one chunk via the free demo endpoint (SSE stream of PCM)."""
-    payload = {
-        "text": text,
-        "dialect": DIALECT,
-        "voice": VOICE,
-        "model_version": MODEL_VERSION,
-        "stream_format": "sse",
-    }
+def _decode_sse_audio(raw_lines: list) -> bytes:
+    """Extract the concatenated PCM bytes out of a full SSE line stream.
 
-    response = requests.post(
-        FREE_URL, json=payload, timeout=REQUEST_TIMEOUT, stream=True
-    )
-    response.raise_for_status()
-
+    Shared between a live stream and a cached one, so a cache hit is parsed
+    exactly the way a fresh response would be.
+    """
     audio_content = b""
-    for line in response.iter_lines():
-        if not line:
+    for decoded_line in raw_lines:
+        if not decoded_line:
             continue
 
-        decoded_line = line.decode("utf-8")
         data_str = None
         if decoded_line.startswith("data: "):
             data_str = decoded_line[len("data: ") :]
@@ -171,7 +169,36 @@ def _synthesize_free(text: str) -> AudioSegment:
                 audio_content += base64.b64decode(audio_b64)
         elif event_type == "speech.audio.done":
             log(f"API Usage: {data.get('usage', {})}")
+    return audio_content
 
+
+def _synthesize_free(text: str) -> AudioSegment:
+    """Synthesize one chunk via the free demo endpoint (SSE stream of PCM).
+
+    A cache hit replays the full SSE body saved from a prior call, saved
+    exactly as it arrived, and never touches the network.
+    """
+    cached = response_cache.read(text, "free")
+    if cached is not None:
+        raw_lines = cached.decode("utf-8").split("\n")
+    else:
+        payload = {
+            "text": text,
+            "dialect": DIALECT,
+            "voice": VOICE,
+            "model_version": MODEL_VERSION,
+            "stream_format": "sse",
+        }
+        response = requests.post(
+            FREE_URL, json=payload, timeout=REQUEST_TIMEOUT, stream=True
+        )
+        response.raise_for_status()
+        raw_lines = [line.decode("utf-8") for line in response.iter_lines() if line]
+        response_cache.write(
+            text, "free", "\n".join(raw_lines).encode("utf-8"), "text/event-stream"
+        )
+
+    audio_content = _decode_sse_audio(raw_lines)
     if not audio_content:
         raise RuntimeError("No audio content received from free endpoint")
 
@@ -184,32 +211,38 @@ def _synthesize_free(text: str) -> AudioSegment:
 
 
 def _synthesize_paid(text: str) -> AudioSegment:
-    """Synthesize one chunk via the authenticated endpoint (returns a WAV)."""
-    if not KURDISH_TTS_API_KEY:
-        raise RuntimeError(
-            f"Chunk is {len(text)} chars (over the {FREE_CHAR_LIMIT} char free "
-            "limit) but KURDISH_TTS_API_KEY is not set"
+    """Synthesize one chunk via the authenticated endpoint (returns a WAV).
+
+    A cache hit reuses the WAV bytes saved from a prior call and never
+    touches the network, so it needs no API key either.
+    """
+    content = response_cache.read(text, "paid")
+    if content is None:
+        if not KURDISH_TTS_API_KEY:
+            raise RuntimeError(
+                f"Chunk is {len(text)} chars (over the {FREE_CHAR_LIMIT} char free "
+                "limit) but KURDISH_TTS_API_KEY is not set"
+            )
+        payload = {
+            "text": text,
+            "speaker_id": VOICE,
+            "model_version": MODEL_VERSION,
+            "format": "wav",
+        }
+        response = requests.post(
+            PAID_URL,
+            json=payload,
+            headers={"x-api-key": KURDISH_TTS_API_KEY},
+            timeout=REQUEST_TIMEOUT,
         )
+        response.raise_for_status()
+        content = response.content
+        response_cache.write(text, "paid", content, "audio/wav")
 
-    payload = {
-        "text": text,
-        "speaker_id": VOICE,
-        "model_version": MODEL_VERSION,
-        "format": "wav",
-    }
-
-    response = requests.post(
-        PAID_URL,
-        json=payload,
-        headers={"x-api-key": KURDISH_TTS_API_KEY},
-        timeout=REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
-
-    if not response.content:
+    if not content:
         raise RuntimeError("No audio content received from authenticated endpoint")
 
-    return AudioSegment.from_file(io.BytesIO(response.content), format="wav")
+    return AudioSegment.from_file(io.BytesIO(content), format="wav")
 
 
 def _samples(segment: AudioSegment) -> np.ndarray:
@@ -247,6 +280,20 @@ def _is_artifact(islands: list, index: int) -> bool:
     return before >= ARTIFACT_BEFORE_MS and after >= ARTIFACT_AFTER_MS
 
 
+def _fade(segment: AudioSegment, ms: int, at_start: bool) -> AudioSegment:
+    """Raised-cosine fade to true zero, at one edge of `segment`."""
+    samples = _samples(segment)
+    n = min(int(ms * segment.frame_rate / 1000), len(samples) // 2)
+    if n > 0:
+        ramp = 0.5 - 0.5 * np.cos(np.linspace(0, np.pi, n))
+        if at_start:
+            samples[:n] *= ramp
+        else:
+            samples[-n:] *= ramp[::-1]
+    sealed = np.clip(np.round(samples), -32768, 32767).astype(np.int16)
+    return segment._spawn(sealed.tobytes())
+
+
 def _trim_silence(segment: AudioSegment) -> AudioSegment:
     """Cut a chunk down to its speech: no pad silence, no engine artifact."""
     islands = _sound_islands(segment)
@@ -262,27 +309,26 @@ def _trim_silence(segment: AudioSegment) -> AudioSegment:
         start = islands[i][0] - ARTIFACT_CUT_MS
         if start <= cursor:
             continue  # a burst before the first speech is already outside
-        # Both cut points sit in silence, so the splice cannot tick. The pause
-        # the engine left before the burst stays; its lead silence after goes.
-        kept += segment[cursor:start]
+        # Both cut points sit in silence, but the engine's own "silence" is
+        # not true zero: two raw slices joined there can still step. A short
+        # fade on each side, inside the margin the burst check guarantees,
+        # seals the splice the same way the clip's outer edges are sealed.
+        piece = segment[cursor:start]
+        if len(kept):
+            piece = _fade(piece, SPLICE_FADE_MS, at_start=True)
+        kept += _fade(piece, SPLICE_FADE_MS, at_start=False)
         cursor = islands[i + 1][0] - HEAD_PAD_MS
         log(f"  cut a {islands[i][1] - islands[i][0]}ms engine artifact at {islands[i][0]}ms")
     end = min(len(segment), speech[-1][1] + TAIL_PAD_MS)
-    return kept + segment[cursor:end]
+    tail = segment[cursor:end]
+    if len(kept):
+        tail = _fade(tail, SPLICE_FADE_MS, at_start=True)
+    return kept + tail
 
 
 def _seal_edges(segment: AudioSegment) -> AudioSegment:
     """Raised-cosine fades to exactly zero, so a splice cannot step or tick."""
-    samples = _samples(segment)
-    per_ms = segment.frame_rate / 1000
-    fade_in = min(int(FADE_IN_MS * per_ms), len(samples) // 2)
-    fade_out = min(int(FADE_OUT_MS * per_ms), len(samples) // 2)
-    if fade_in > 0:
-        samples[:fade_in] *= 0.5 - 0.5 * np.cos(np.linspace(0, np.pi, fade_in))
-    if fade_out > 0:
-        samples[-fade_out:] *= 0.5 + 0.5 * np.cos(np.linspace(0, np.pi, fade_out))
-    sealed = np.clip(np.round(samples), -32768, 32767).astype(np.int16)
-    return segment._spawn(sealed.tobytes())
+    return _fade(_fade(segment, FADE_OUT_MS, at_start=False), FADE_IN_MS, at_start=True)
 
 
 def _merge_segments(segments: list) -> AudioSegment:

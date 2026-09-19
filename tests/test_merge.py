@@ -24,6 +24,12 @@ def _silence(ms: int) -> np.ndarray:
     return np.zeros(RATE * ms // 1000)
 
 
+def _hum(ms: int, amplitude: float = 100.0, hz: float = 2000.0) -> np.ndarray:
+    """Quiet room tone: well under ACTIVE_DBFS, but never exactly zero -
+    the engine's real "silence" is like this, not digital zero."""
+    return _tone(ms, amplitude=amplitude, hz=hz)
+
+
 def _segment(*parts: np.ndarray, rate: int = RATE) -> AudioSegment:
     data = np.concatenate(parts).astype(np.int16).tobytes()
     return AudioSegment(data=data, sample_width=2, frame_rate=rate, channels=1)
@@ -63,6 +69,26 @@ class TrimTest(unittest.TestCase):
         self.assertEqual(len(islands), 2)
         pause = islands[1][0] - islands[0][1]
         self.assertLessEqual(abs(pause - (960 + t.HEAD_PAD_MS - t.ARTIFACT_CUT_MS)), 3 * t.FRAME_MS)
+
+    def test_burst_cut_fades_instead_of_stepping(self):
+        # The engine's own silence carries a little noise, not true zero
+        # (measured on a live burst cut, 2026-09-19: a 125-of-32768 step).
+        # `_hum` stands in for that noise; a raw splice there still ticks.
+        burst = _tone(15, amplitude=600.0, hz=900.0)
+        chunk = _segment(
+            _hum(100), _tone(600), _hum(960), burst, _hum(480), _tone(700), _hum(90),
+        )
+        islands = t._sound_islands(chunk)
+        bursts = [i for i in range(len(islands)) if t._is_artifact(islands, i)]
+        self.assertEqual(len(bursts), 1)
+        cursor = max(0, islands[0][0] - t.HEAD_PAD_MS)
+        join_ms = islands[bursts[0]][0] - t.ARTIFACT_CUT_MS - cursor
+        join_idx = round(join_ms * RATE / 1000)
+
+        trimmed = t._trim_silence(chunk)
+        samples = t._samples(trimmed)
+        window = samples[join_idx - 10 : join_idx + 10]
+        self.assertLess(np.abs(np.diff(window)).max(), 20)
 
     def test_final_plosive_after_a_short_closure_is_kept(self):
         plosive = _tone(20, amplitude=3000.0, hz=1200.0)

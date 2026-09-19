@@ -112,9 +112,11 @@ def preprocess_text(text: str) -> str:
 # of the file name, so every clip made by an older pipeline stops being served
 # and is rebuilt on the next request. 2: the engine's head artifact is trimmed
 # and joins happen at true silence (2026-09-18). 3: the same burst is also cut
-# from between sentences inside one clip (2026-09-19). Older files are deleted when
-# the service starts (`prune_stale_cache`), so a deploy cleans up after itself.
-AUDIO_VERSION = 3
+# from between sentences inside one clip (2026-09-19). 4: a burst cut fades
+# instead of splicing raw silence, which was not true zero and could still
+# step (2026-09-19). Older files are deleted when the service starts
+# (`prune_stale_cache`), so a deploy cleans up after itself.
+AUDIO_VERSION = 4
 
 
 def get_cache_path(text: str) -> Path:

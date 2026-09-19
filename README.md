@@ -193,7 +193,7 @@ Health check endpoint.
 ```json
 {
   "status": "healthy",
-  "audio_version": 3,
+  "audio_version": 4,
   "cache": { "current": 120, "stale": 0 },
   "tts_model_loaded": true
 }
@@ -240,7 +240,9 @@ The service intelligently selects between two TTS engines:
    - Chunks are generated in parallel (up to 4 at a time) and merged seamlessly:
      each chunk is trimmed to its speech, faded to zero at both edges,
      level-matched, and joined across a short silence, so there is no click at
-     any boundary
+     any boundary. A burst the engine leaves between sentences inside one
+     chunk is cut out too; the cut itself is faded a few ms on each side,
+     since the engine's own "silence" carries a little noise, not true zero
    - Automatic fallback to local model if the API fails
 
 2. **Local Facebook MMS Model** (`facebook/mms-tts-kmr-script_latin`)
@@ -261,6 +263,15 @@ The service applies several preprocessing steps before TTS generation:
 - Audio files are cached using SHA-256 hash of the input text
 - Cache directory is persisted via Docker volume
 - Identical requests return cached files instantly
+- The full upstream response for each chunk sent to the Kurdish TTS API - the
+  raw SSE body from the free endpoint, the raw WAV bytes from the
+  authenticated one - is also kept, at `<CACHE_DIR>/responses/<sha256 of that
+  chunk's text>.<free|paid>.body`, with a `.meta.json` sidecar (content type,
+  size). This is keyed on the chunk text alone, not on `AUDIO_VERSION`, so a
+  pipeline change never invalidates it, and a repeat chunk is parsed from
+  disk without a second call upstream. Nothing in the API reads it back today
+  - it is there for the alignment and timing data upstream sends alongside
+  the audio, which the pipeline otherwise discards.
 
 ### Async Processing
 
