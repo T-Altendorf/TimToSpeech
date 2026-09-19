@@ -60,7 +60,7 @@ class ResponseCacheTest(unittest.TestCase):
         with mock.patch.object(t.requests, "post", return_value=_FakeResponse(body)):
             t._synthesize_free("Rojbaş")
 
-        stored = response_cache.read("Rojbaş", "free")
+        stored = response_cache.read("Rojbaş", "free", t.CACHE_VARIANT)
         # The stored body round-trips through str/bytes (utf-8 text), which
         # this payload survives unchanged: no upstream byte is lost.
         self.assertEqual(stored, body)

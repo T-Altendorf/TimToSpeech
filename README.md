@@ -265,9 +265,10 @@ The service applies several preprocessing steps before TTS generation:
 - Identical requests return cached files instantly
 - The full upstream response for each chunk sent to the Kurdish TTS API - the
   raw SSE body from the free endpoint, the raw WAV bytes from the
-  authenticated one - is also kept, at `<CACHE_DIR>/responses/<sha256 of that
-  chunk's text>.<free|paid>.body`, with a `.meta.json` sidecar (content type,
-  size). This is keyed on the chunk text alone, not on `AUDIO_VERSION`, so a
+  authenticated one - is also kept, at `<CACHE_DIR>/responses/<sha256 of the
+  dialect, the voice and that chunk's text>.<free|paid>.body`, with a
+  `.meta.json` sidecar (content type, size, dialect and voice). The key never
+  includes `AUDIO_VERSION`, so a
   pipeline change never invalidates it, and a repeat chunk is parsed from
   disk without a second call upstream. Nothing in the API reads it back today
   - it is there for the alignment and timing data upstream sends alongside

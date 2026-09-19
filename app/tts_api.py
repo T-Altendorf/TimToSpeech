@@ -25,6 +25,8 @@ PAID_CHAR_LIMIT = 5000
 
 DIALECT = "kurmanji"
 VOICE = "kurmanji_236"
+# What the response cache keys on beside the text: a new voice is a new request.
+CACHE_VARIANT = f"{DIALECT}/{VOICE}"
 MODEL_VERSION = "v4"
 
 # The demo endpoint streams raw 16-bit mono PCM at this rate (verified against
@@ -178,7 +180,7 @@ def _synthesize_free(text: str) -> AudioSegment:
     A cache hit replays the full SSE body saved from a prior call, saved
     exactly as it arrived, and never touches the network.
     """
-    cached = response_cache.read(text, "free")
+    cached = response_cache.read(text, "free", CACHE_VARIANT)
     if cached is not None:
         raw_lines = cached.decode("utf-8").split("\n")
     else:
@@ -195,7 +197,11 @@ def _synthesize_free(text: str) -> AudioSegment:
         response.raise_for_status()
         raw_lines = [line.decode("utf-8") for line in response.iter_lines() if line]
         response_cache.write(
-            text, "free", "\n".join(raw_lines).encode("utf-8"), "text/event-stream"
+            text,
+            "free",
+            "\n".join(raw_lines).encode("utf-8"),
+            "text/event-stream",
+            CACHE_VARIANT,
         )
 
     audio_content = _decode_sse_audio(raw_lines)
@@ -216,7 +222,7 @@ def _synthesize_paid(text: str) -> AudioSegment:
     A cache hit reuses the WAV bytes saved from a prior call and never
     touches the network, so it needs no API key either.
     """
-    content = response_cache.read(text, "paid")
+    content = response_cache.read(text, "paid", CACHE_VARIANT)
     if content is None:
         if not KURDISH_TTS_API_KEY:
             raise RuntimeError(
@@ -237,7 +243,7 @@ def _synthesize_paid(text: str) -> AudioSegment:
         )
         response.raise_for_status()
         content = response.content
-        response_cache.write(text, "paid", content, "audio/wav")
+        response_cache.write(text, "paid", content, "audio/wav", CACHE_VARIANT)
 
     if not content:
         raise RuntimeError("No audio content received from authenticated endpoint")
