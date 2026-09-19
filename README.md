@@ -231,7 +231,7 @@ The Docker Compose configuration includes a named volume (`tts-cache`) that pers
 
 The service intelligently selects between two TTS engines:
 
-1. **Kurdish TTS API** — used for all text, with two endpoints
+1. **Kurdish TTS API**: used for all text, with two endpoints
    - Free (`/api/tts-demo`): every chunk of 150 characters or fewer. No key required.
    - Authenticated (`/api/tts-proxy`): only sentences that are themselves longer
      than 150 characters and so cannot be split any further. Requires
