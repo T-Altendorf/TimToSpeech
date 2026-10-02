@@ -5,8 +5,9 @@ so nobody can fill the cache with arbitrary voices. The default voice keeps
 every key it had before voices existed (clip, manifest, response cache), so
 nothing already cached is rebuilt or renamed.
 
-The four studio voices were picked for the app's scene speakers (kmj-daily
-backlog P50, 2026-10-02); they exist only on the engine's v5.
+The other voices were picked for the app's scene speakers and roleplay
+partners (kmj-daily backlog P50, 2026-10-02); they all run on the engine's
+v5, which only the free endpoint gives us.
 """
 
 from typing import NamedTuple
@@ -30,6 +31,14 @@ VOICES = {
     "studio_docu_m": Voice("v5", paid=False),
     "studio_host_f": Voice("v5", paid=False),
     "studio_teacher_f": Voice("v5", paid=False),
+    # Six more roleplay partners, cast 2026-10-02 from the engine's v5 list,
+    # each checked on four lines for pace, inner pauses and the v5 trim.
+    "studio_docu_f": Voice("v5", paid=False),  # Xecê
+    "cast_f3": Voice("v5", paid=False),  # Xezal
+    "cast_f2": Voice("v5", paid=False),  # Şêrîn
+    "studio_host_m": Voice("v5", paid=False),  # Ferîd
+    "cast_m2": Voice("v5", paid=False),  # Kawa
+    "kurmanji_270": Voice("v5", paid=False),  # Azad
 }
 
 

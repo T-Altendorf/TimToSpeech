@@ -167,6 +167,12 @@ For first-time generation of complex text, the service may take time. The endpoi
 | `studio_docu_m` | v5 | no |
 | `studio_host_f` | v5 | no |
 | `studio_teacher_f` | v5 | no |
+| `studio_docu_f` | v5 | no |
+| `cast_f3` | v5 | no |
+| `cast_f2` | v5 | no |
+| `studio_host_m` | v5 | no |
+| `cast_m2` | v5 | no |
+| `kurmanji_270` | v5 | no |
 
 The authenticated endpoint answers 403 "TTS v5 requires a paid API plan" for the v5 voices on the current key (2026-10-02), so they stay on the free endpoint: a sentence over 150 characters is split on words instead.
 

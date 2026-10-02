@@ -118,6 +118,19 @@ class KeysTest(_TempCache):
         self.assertTrue(all(path.exists() for path in keep))
 
 
+class TableTest(unittest.TestCase):
+    def test_the_allow_list(self):
+        v5 = [
+            "studio_elder_m", "studio_docu_m", "studio_host_f", "studio_teacher_f",
+            "studio_docu_f", "cast_f3", "cast_f2", "studio_host_m", "cast_m2", "kurmanji_270",
+        ]
+        self.assertEqual(voices.allowed(), ["kurmanji_236", *v5])
+        self.assertEqual(voices.model_version("kurmanji_236"), "v4")
+        for voice in v5:
+            self.assertEqual(voices.model_version(voice), "v5")
+            self.assertFalse(voices.accepts_paid(voice))
+
+
 class RoutesTest(_TempCache):
     def test_unknown_voice_is_a_400_with_the_allowed_ids(self):
         for route in ["/tts", "/alignment"]:
