@@ -170,6 +170,8 @@ For first-time generation of complex text, the service may take time. The endpoi
 
 The authenticated endpoint answers 403 "TTS v5 requires a paid API plan" for the v5 voices on the current key (2026-10-02), so they stay on the free endpoint: a sentence over 150 characters is split on words instead.
 
+v5 output gets one more trim rule (`TRIM_RULES` in `app/tts_api.py`, keyed by model version; v4 has none and its output is unchanged): the engine's head burst is cut even when less silence follows it than on v4, and sound that starts more than 600 ms after the engine's last word is dropped.
+
 The default voice keeps every key it had: clip `cache/{sha256(text)}.a{v}.mp3`, manifest `cache/alignments/{sha256(text)}.a{v}.json`, response cache variant `kurmanji/kurmanji_236`. Any other voice carries its id: clip `{sha256(text)}.{voice}.a{v}.mp3`, manifest `{sha256(text)}.{voice}.a{v}.json`, response cache variant `kurmanji/{voice}`. `GET /alignment` takes the same `voice`, and `/health` lists the voices.
 
 **Example with polling:**

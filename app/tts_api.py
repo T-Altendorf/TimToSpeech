@@ -85,6 +85,30 @@ SPLICE_FADE_MS = 5
 CHUNK_GAP_MS = 600
 LEAD_IN_MS = 50  # silence before the first chunk, room for the MP3 encoder delay
 LEAD_OUT_MS = 80
+
+
+class TrimRule(NamedTuple):
+    """What a model version's output needs cut beyond the v4 burst rule above."""
+
+    head_burst_max_ms: int  # a first island at most this long ...
+    head_gap_after_ms: int  # ... with at least this much silence after it is the burst
+    tail_after_last_word_ms: int  # an island starting this long after the last word is not speech
+
+
+# Measured 2026-10-02 on 32 v5 clips (8 lines by each of the 4 studio voices).
+# Head: the burst sits 60-70ms in, 10-25ms long, and the silence after it can
+# be as short as 100ms (studio_docu_m), under ARTIFACT_AFTER_MS, so the v4
+# rule kept it as a tick. The shortest real first-word island was 95ms
+# ("Tu", studio_teacher_f), followed by at most 65ms of silence. 40ms and
+# 80ms sit between the two. Tail: real speech ended at most 300ms after the
+# engine's last word end ("Ez baş im.", studio_docu_m), while the stray
+# sound after a line began 1080-1365ms after it; 600ms is twice the first
+# and well short of the second. v4 has no entry: its output stays as it was.
+TRIM_RULES = {"v5": TrimRule(head_burst_max_ms=40, head_gap_after_ms=80, tail_after_last_word_ms=600)}
+
+
+def trim_rule(voice: str) -> TrimRule | None:
+    return TRIM_RULES.get(voices.model_version(voice))
 MAX_GAIN_MATCH_DB = 4.0
 # Peak headroom always left when gaining a chunk up, so matching cannot clip.
 CLIP_HEADROOM_DB = 0.5
@@ -374,6 +398,19 @@ def _is_artifact(islands: list, index: int) -> bool:
     return before >= ARTIFACT_BEFORE_MS and after >= ARTIFACT_AFTER_MS
 
 
+def _rule_cuts(islands: list, rule: TrimRule, words: list | None) -> set:
+    """The islands a model version's own rule says are not speech."""
+    cuts = set()
+    if len(islands) > 1:
+        start, end = islands[0]
+        if end - start <= rule.head_burst_max_ms and islands[1][0] - end >= rule.head_gap_after_ms:
+            cuts.add(0)
+    if words:
+        bound = max(word["end"] for word in words) * 1000 + rule.tail_after_last_word_ms
+        cuts.update(i for i, (start, _) in enumerate(islands) if start > bound)
+    return cuts
+
+
 def _fade(segment: AudioSegment, ms: int, at_start: bool) -> AudioSegment:
     """Raised-cosine fade to true zero, at one edge of `segment`."""
     samples = _samples(segment)
@@ -388,15 +425,20 @@ def _fade(segment: AudioSegment, ms: int, at_start: bool) -> AudioSegment:
     return segment._spawn(sealed.tobytes())
 
 
-def _trim_plan(segment: AudioSegment) -> list:
+def _trim_plan(segment: AudioSegment, rule: TrimRule | None = None, words: list | None = None) -> list:
     """The raw (start_ms, end_ms) ranges `_trim_silence` keeps, in order.
 
     The speech island(s), padded by HEAD_PAD_MS and TAIL_PAD_MS, with any
     engine burst cut from the middle. An all-silence chunk has nothing to
-    keep, so the plan is the whole chunk, one range.
+    keep, so the plan is the whole chunk, one range. `rule` (a model
+    version's own, never v4's) and the chunk's engine `words` cut more; a
+    cut island before the first or after the last speech simply falls
+    outside the plan, and the clip's edges are faded as always.
     """
     islands = _sound_islands(segment)
     bursts = [i for i in range(len(islands)) if _is_artifact(islands, i)]
+    if rule:
+        bursts = sorted(set(bursts) | _rule_cuts(islands, rule, words))
     speech = [island for i, island in enumerate(islands) if i not in bursts]
     if not speech:
         return [(0, len(segment))]
@@ -473,8 +515,11 @@ class MergedAudio(NamedTuple):
     trim_plans: list  # each input chunk's `_trim_plan` ranges, same order
 
 
-def _merge_segments(segments: list) -> MergedAudio:
-    """Clean every chunk (a single one too) and join them at true silence."""
+def _merge_segments(segments: list, rule: TrimRule | None = None, words: list | None = None) -> MergedAudio:
+    """Clean every chunk (a single one too) and join them at true silence.
+
+    `words`: each chunk's engine word times (or None), read only by `rule`.
+    """
     # Chunks can come back at different rates (the free endpoint streams
     # 22050 Hz, the authenticated one 24 kHz), so normalize the format first.
     rate = max(segment.frame_rate for segment in segments)
@@ -482,7 +527,8 @@ def _merge_segments(segments: list) -> MergedAudio:
         segment.set_frame_rate(rate).set_channels(1).set_sample_width(2)
         for segment in segments
     ]
-    plans = [_trim_plan(segment) for segment in normalized]
+    chunk_words = words or [None] * len(normalized)
+    plans = [_trim_plan(segment, rule, w) for segment, w in zip(normalized, chunk_words)]
     prepared = _level_matched(
         [_apply_trim_plan(segment, plan) for segment, plan in zip(normalized, plans)]
     )
@@ -623,7 +669,11 @@ def call_kurdish_tts_api(text: str, output_path: Path, voice: str = voices.DEFAU
                     executor.map(_synthesize_chunk, range(len(chunks)), chunks, [voice] * len(chunks))
                 )
 
-        merged = _merge_segments([result.audio for result in chunk_results])
+        merged = _merge_segments(
+            [result.audio for result in chunk_results],
+            trim_rule(voice),
+            [result.words for result in chunk_results],
+        )
         merged.audio.export(str(output_path), format="mp3", bitrate="128k")
         _write_alignment(text, voice, chunk_results, merged)
 

@@ -225,5 +225,50 @@ class UpstreamTest(_TempCache):
         self.assertEqual(" ".join(chunks), sentence)
 
 
+def _tone(ms: int) -> "t.AudioSegment":
+    rate = 22050
+    n = rate * ms // 1000
+    pcm = (8000 * np.sin(2 * np.pi * 180 * np.arange(n) / rate)).astype(np.int16).tobytes()
+    return t.AudioSegment(data=pcm, sample_width=2, frame_rate=rate, channels=1)
+
+
+def _silence(ms: int) -> "t.AudioSegment":
+    return t.AudioSegment.silent(duration=ms, frame_rate=22050)
+
+
+class V5TrimTest(unittest.TestCase):
+    """The shape measured on studio_docu_m: a 20ms burst at 65ms with only
+    100ms of silence after it, and stray sound 1.2s after the last word."""
+
+    def setUp(self):
+        self.segment = _silence(65) + _tone(20) + _silence(100) + _tone(600) + _silence(1200) + _tone(300)
+        self.words = [{"word": "silav", "start": 0.0, "end": 0.8}]
+
+    def test_default_voice_trims_byte_for_byte_as_before(self):
+        self.assertIsNone(t.trim_rule(voices.DEFAULT_VOICE))
+        before = t._merge_segments([self.segment])
+        now = t._merge_segments([self.segment], t.trim_rule(voices.DEFAULT_VOICE), [self.words])
+        self.assertEqual(now.audio.raw_data, before.audio.raw_data)
+        self.assertEqual(now.trim_plans, before.trim_plans)
+        self.assertLessEqual(before.trim_plans[0][0][0], 65)  # v4 keeps this burst, as it always did
+
+    def test_a_v5_voice_loses_the_head_burst_and_the_stray_tail(self):
+        plan = t._trim_plan(self.segment, t.trim_rule(ELDER), self.words)
+        self.assertEqual(len(plan), 1)
+        self.assertGreater(plan[0][0], 85)  # starts after the burst
+        self.assertLess(plan[0][1], 1985)  # ends before the stray sound
+        self.assertGreaterEqual(plan[0][1], 785)  # the speech is all there
+
+    def test_no_word_times_skips_the_tail_rule(self):
+        plan = t._trim_plan(self.segment, t.trim_rule(ELDER), None)
+        self.assertGreater(plan[-1][1], 1985)
+
+    def test_a_short_first_word_is_not_taken_for_the_burst(self):
+        # "Tu" on studio_teacher_f: a 95ms first island, 65ms of silence after it.
+        segment = _silence(90) + _tone(95) + _silence(65) + _tone(450) + _silence(100)
+        plan = t._trim_plan(segment, t.trim_rule(ELDER), [{"word": "yî", "start": 0.48, "end": 0.7}])
+        self.assertLessEqual(plan[0][0], 90)
+
+
 if __name__ == "__main__":
     unittest.main()
