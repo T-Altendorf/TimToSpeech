@@ -134,7 +134,13 @@ def get_cache_path(text: str, voice: str = voices.DEFAULT_VOICE) -> Path:
     `{hash}.a{v}.mp3` for the default voice, `{hash}.{voice}.a{v}.mp3` for any
     other. Both end in `.a{v}.mp3`, which is all pruning and counting test.
     """
-    return CACHE_DIR / f"{text_hash(text)}{voices.file_tag(voice)}{_cache_suffix()}"
+    return clip_path_for_hash(text_hash(text), voice)
+
+
+def clip_path_for_hash(hashed: str, voice: str = voices.DEFAULT_VOICE) -> Path:
+    """The same path from the text's hash, for a caller that has no text (a
+    manifest found on disk by the alignment check's sweep)."""
+    return CACHE_DIR / f"{hashed}{voices.file_tag(voice)}{_cache_suffix()}"
 
 
 def _cache_suffix() -> str:

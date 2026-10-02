@@ -11,7 +11,7 @@ from flask_cors import CORS
 from .config import log, CACHE_DIR, TTS_WAIT_TIMEOUT, CORS_ORIGINS
 from .utils import AUDIO_VERSION, cache_counts, get_cache_path, prune_stale_cache, text_hash
 from .tts_local import load_models, generate_audio
-from . import alignment, tts_local, voices
+from . import alignment, alignment_check, alignment_sweep, tts_local, voices
 from .tts_api import call_kurdish_tts_api
 
 app = Flask(__name__)
@@ -27,7 +27,12 @@ processing_jobs = {}
 
 
 def generate_tts_async(
-    job_id: str, text: str, output_path: str, use_api: bool, voice: str = voices.DEFAULT_VOICE
+    job_id: str,
+    text: str,
+    output_path: str,
+    use_api: bool,
+    voice: str = voices.DEFAULT_VOICE,
+    regenerated: bool = False,
 ):
     """
     Wrapper for async TTS generation (either API or local model)
@@ -40,12 +45,16 @@ def generate_tts_async(
         voice: A voice id from `app/voices.py`. Only the default voice falls
             back to the local model: it has one voice, and a fallback clip
             saved under another voice's name would be a lie in the cache.
+        regenerated: the clip replaces one the alignment check found stray
+            sound in (`_replaces_stray_tail`); never replaced a second time.
     """
     processing_jobs[job_id] = {"status": "processing", "path": None}
 
     success = False
     if use_api:
-        success = call_kurdish_tts_api(text, output_path, voice)
+        # The flag is passed only when set, so the call is exactly as before otherwise.
+        extra = {"regenerated": True} if regenerated else {}
+        success = call_kurdish_tts_api(text, output_path, voice, **extra)
         if not success and voice == voices.DEFAULT_VOICE:
             log("Kurdish TTS API failed, falling back to local model")
             success = generate_audio(text, output_path)
@@ -67,6 +76,29 @@ def _requested_voice() -> tuple:
     except voices.UnknownVoice as error:
         refusal = {"error": f"Unknown voice '{error}'", "allowed_voices": voices.allowed()}
         return None, (jsonify(refusal), 400)
+
+
+def _replaces_stray_tail(text: str, voice: str) -> bool:
+    """Whether a cached clip is to be synthesised once more (2026-10-02).
+
+    A clip in a voice other than the default whose check found stray sound
+    after its words is not a valid cache entry, once: the regenerated clip's
+    manifest says `regenerated`, so it is never replaced again. A default-voice
+    clip is never replaced by the check (he has those on his phone); only
+    its words are withheld.
+    """
+    if voice == voices.DEFAULT_VOICE:
+        return False
+    hashed = text_hash(text)
+    manifest = alignment_sweep.ensure_checked(hashed, voice, alignment.read(hashed, AUDIO_VERSION, voice))
+    if not manifest or not alignment_check.is_current(manifest):
+        return False
+    return alignment_check.has_stray_tail(manifest) and not manifest["check"]["regenerated"]
+
+
+def _was_regenerated(text: str, voice: str) -> bool:
+    manifest = alignment.read(text_hash(text), AUDIO_VERSION, voice) or {}
+    return bool(manifest.get("check", {}).get("regenerated"))
 
 
 @app.route("/tts", methods=["GET"])
@@ -105,13 +137,18 @@ def text_to_speech():
             log(f"Failed to invalidate cache for text: '{text[:50]}...': {e}")
             return jsonify({"error": "Failed to invalidate cache"}), 500
 
+    regenerating = False
     if cache_path.exists():
-        if alignment.exists(text_hash(text), AUDIO_VERSION, voice):
+        if not alignment.exists(text_hash(text), AUDIO_VERSION, voice):
+            # Every clip must have a manifest (2026-09-19). One that does not
+            # is not a valid cache entry - drop it and fall through to regenerate.
+            log(f"Cached clip has no alignment manifest, regenerating: '{text[:50]}...'")
+        elif _replaces_stray_tail(text, voice):
+            log(f"Cached clip has stray sound after its words, regenerating once: '{text[:50]}...'")
+            regenerating = True
+        else:
             log(f"Cache hit for text: '{text[:50]}...'")
             return send_file(cache_path, mimetype="audio/mpeg")
-        # Every clip must have a manifest (2026-09-19). One that does not is
-        # not a valid cache entry - drop it and fall through to regenerate.
-        log(f"Cached clip has no alignment manifest, regenerating: '{text[:50]}...'")
         try:
             cache_path.unlink()
         except OSError:
@@ -125,7 +162,8 @@ def text_to_speech():
     job_id = hashlib.sha256(f"{text}{os.urandom(8).hex()}".encode()).hexdigest()[:16]
 
     # Start async generation
-    thread = Thread(target=generate_tts_async, args=(job_id, text, cache_path, use_api, voice))
+    regenerated = regenerating or _was_regenerated(text, voice)
+    thread = Thread(target=generate_tts_async, args=(job_id, text, cache_path, use_api, voice, regenerated))
     thread.daemon = True
     thread.start()
 
@@ -168,8 +206,9 @@ def check_status(job_id):
 def get_alignment():
     """The saved word-for-word timing manifest for a clip, if one was written.
 
-    Additive and read-only: no existing route's response changes. The app
-    does not call this yet (2026-09-19).
+    A manifest of the current version is checked against its clip's sound
+    before it is served, if it was not yet (`alignment_sweep.ensure_checked`);
+    a chunk that fails has `words: null` and the engine's under `rejected_words`.
     Query parameters:
       - text: the exact text the clip was generated from (required)
       - audio_version: which pipeline version's manifest to read (default: current)
@@ -189,6 +228,9 @@ def get_alignment():
         return jsonify({"error": "'audio_version' must be an integer"}), 400
 
     manifest = alignment.read(text_hash(text), version, voice)
+    if version == AUDIO_VERSION:
+        # Never serve word times the check has not seen (2026-10-02).
+        manifest = alignment_sweep.ensure_checked(text_hash(text), voice, manifest)
     if manifest is None:
         return jsonify({"error": "No alignment manifest for this text"}), 404
     return jsonify(manifest)
@@ -214,6 +256,9 @@ def health():
             "voices": {voice: voices.model_version(voice) for voice in voices.allowed()},
             "tts_model_loaded": tts_local.model is not None
             and tts_local.tokenizer is not None,
+            # version, checked, failed, pending: `pending` falls to 0 once the
+            # startup sweep is through (`app/alignment_sweep.py`).
+            "alignment_check": alignment_sweep.health(),
         }
     )
 

@@ -1,9 +1,9 @@
 """Word-for-word timing for a saved clip: what the manifest holds and how.
 
 A manifest is written once, right after a clip is generated
-(`tts_api.call_kurdish_tts_api`), and never touched again. The app does not
-read it yet (2026-09-19); this exists so a saved clip can still give word for
-word timing later. It records, per chunk of the request, how the raw engine
+(`tts_api.call_kurdish_tts_api`); after that only the alignment check
+(`alignment_check`, `alignment_sweep`) rewrites it, to record its verdict.
+The app lights each word as it is spoken from it (2026-10-02). It records, per chunk of the request, how the raw engine
 audio was cut down to what the clip plays, so a raw word time - in seconds,
 on the engine's own timeline - can always be found again on the clip's
 timeline, the PCM before MP3 encoding.
@@ -14,6 +14,8 @@ nearest kept edge.
 """
 
 import json
+import os
+import threading
 from pathlib import Path
 
 from .config import CACHE_DIR, log
@@ -122,7 +124,12 @@ def write(text_hash: str, audio_version: int, manifest: dict, voice: str = voice
     """Save a manifest. Never raises: a write failure must not fail the clip."""
     try:
         ALIGNMENT_DIR.mkdir(parents=True, exist_ok=True)
-        path_for(text_hash, audio_version, voice).write_text(json.dumps(manifest))
+        path = path_for(text_hash, audio_version, voice)
+        # Written aside and renamed into place, so a reader (a request, the
+        # alignment check's sweep in another worker) never sees half a file.
+        temporary = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        temporary.write_text(json.dumps(manifest))
+        os.replace(temporary, path)
     except OSError as error:
         log(f"Could not write alignment manifest for {text_hash}: {error}")
 

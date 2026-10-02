@@ -1,0 +1,78 @@
+{
+ "source": "GET /alignment on tts.oelngatikameie.de, 2026-10-02; islands from the decoded cached mp3",
+ "voice": "studio_docu_m",
+ "islands": [
+  [
+   65,
+   950
+  ],
+  [
+   1050,
+   1820
+  ]
+ ],
+ "manifest": {
+  "audio_version": 6,
+  "chunks": [
+   {
+    "endpoint": "free",
+    "generation": null,
+    "index": 0,
+    "pieces": [
+     {
+      "clip_start_ms": 50,
+      "raw_end_ms": 1990,
+      "raw_start_ms": 180
+     }
+    ],
+    "raw_ms": 2044,
+    "response_key": "f8fdd60b8346e0190da71738b7d6d61ba8032401744fc5c46dc159f9f2fff628.free",
+    "text": "Almanya pir dûr a.",
+    "voice": null,
+    "words": [
+     {
+      "alignment_quality": "forced_align",
+      "end_ms": 610,
+      "probability": 0.0,
+      "raw_end_ms": 740,
+      "raw_start_ms": 0,
+      "start_ms": 50,
+      "word": "Almanya"
+     },
+     {
+      "alignment_quality": "forced_align",
+      "end_ms": 1090,
+      "probability": 0.0,
+      "raw_end_ms": 1220,
+      "raw_start_ms": 740,
+      "start_ms": 610,
+      "word": "pir"
+     },
+     {
+      "alignment_quality": "forced_align",
+      "end_ms": 1510,
+      "probability": 0.0,
+      "raw_end_ms": 1640,
+      "raw_start_ms": 1220,
+      "start_ms": 1090,
+      "word": "dûr"
+     },
+     {
+      "alignment_quality": "forced_align",
+      "end_ms": 1750,
+      "probability": 0.497,
+      "raw_end_ms": 1880,
+      "raw_start_ms": 1640,
+      "start_ms": 1510,
+      "word": "ئا."
+     }
+    ]
+   }
+  ],
+  "clip_ms": 1940,
+  "schema": 1,
+  "text": "Almanya pir dûr a.",
+  "timeline": "pcm_before_mp3_encoding",
+  "variant": "kurmanji/studio_docu_m"
+ }
+}

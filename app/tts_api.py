@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import NamedTuple
 import numpy as np
 from pydub import AudioSegment
-from . import alignment, response_cache, voices
+from . import alignment, alignment_check, response_cache, voices
 from .config import log, KURDISH_TTS_API_KEY
 from .utils import AUDIO_VERSION, text_hash
 
@@ -51,6 +51,19 @@ HTTP_TOO_MANY_REQUESTS = 429
 
 class RateLimited(RuntimeError):
     """The free endpoint still answered 429 after every retry."""
+
+
+# A chunk whose word times fail `alignment_check` is synthesised again, past
+# the response cache, at most this many times; the first attempt that passes
+# is kept. A retry is never waited out on a 429: it gives up at once and the
+# clip keeps the best attempt it has, its failing words withheld.
+MAX_CHECK_RETRIES = 2
+
+
+def _cache_endpoint(endpoint: str, attempt: int) -> str:
+    """The response cache name for one attempt: attempt 0 keeps the old key,
+    so every response cached before the check is read exactly as before."""
+    return endpoint if attempt == 0 else f"{endpoint}.r{attempt}"
 
 # Seamless-merge tuning. Measured on the engine's own output (2026-09-18): every
 # clip it returns opens with the same ~20 ms burst at about -35 dBFS, some 60 ms
@@ -231,13 +244,13 @@ class FreeAudio:
     words: list | None  # {word, start, end, alignment_quality, probability}, seconds
 
 
-def _post_free(payload: dict):
+def _post_free(payload: dict, delays: tuple = FREE_RETRY_DELAYS_S):
     """One free request, retried on a 429 with the bounded backoff above.
 
     Raises `RateLimited` once every retry was answered 429; any other error
-    status raises as before.
+    status raises as before. A check retry passes no delays: one 429 raises.
     """
-    for delay in (*FREE_RETRY_DELAYS_S, None):
+    for delay in (*delays, None):
         response = requests.post(FREE_URL, json=payload, timeout=REQUEST_TIMEOUT, stream=True)
         if response.status_code != HTTP_TOO_MANY_REQUESTS:
             response.raise_for_status()
@@ -247,13 +260,14 @@ def _post_free(payload: dict):
             break
         log(f"  free endpoint rate-limited (429), asking again in {delay}s")
         time.sleep(delay)
-    raise RateLimited(f"free endpoint still rate-limited after {len(FREE_RETRY_DELAYS_S)} retries")
+    raise RateLimited(f"free endpoint still rate-limited after {len(delays)} retries")
 
 
-def _fetch_free_lines(text: str, voice: str) -> list:
+def _fetch_free_lines(text: str, voice: str, attempt: int = 0) -> list:
     """This chunk's raw SSE lines: from the response cache, or upstream."""
     variant = voices.variant(voice)
-    cached = response_cache.read(text, "free", variant)
+    endpoint = _cache_endpoint("free", attempt)
+    cached = response_cache.read(text, endpoint, variant)
     if cached is not None:
         return cached.decode("utf-8").split("\n")
 
@@ -264,21 +278,21 @@ def _fetch_free_lines(text: str, voice: str) -> list:
         "model_version": voices.model_version(voice),
         "stream_format": "sse",
     }
-    response = _post_free(payload)
+    response = _post_free(payload, FREE_RETRY_DELAYS_S if attempt == 0 else ())
     raw_lines = [line.decode("utf-8") for line in response.iter_lines() if line]
     response_cache.write(
-        text, "free", "\n".join(raw_lines).encode("utf-8"), "text/event-stream", variant
+        text, endpoint, "\n".join(raw_lines).encode("utf-8"), "text/event-stream", variant
     )
     return raw_lines
 
 
-def _synthesize_free(text: str, voice: str = voices.DEFAULT_VOICE) -> FreeAudio:
+def _synthesize_free(text: str, voice: str = voices.DEFAULT_VOICE, attempt: int = 0) -> FreeAudio:
     """Synthesize one chunk via the free demo endpoint (SSE stream of PCM).
 
     A cache hit replays the full SSE body saved from a prior call, saved
     exactly as it arrived, and never touches the network.
     """
-    audio_content, timing = _decode_sse(_fetch_free_lines(text, voice))
+    audio_content, timing = _decode_sse(_fetch_free_lines(text, voice, attempt))
     if not audio_content:
         raise RuntimeError("No audio content received from free endpoint")
 
@@ -308,7 +322,7 @@ class PaidAudio:
     voice: str | None  # the response's own voice/speaker id, if it reports one
 
 
-def _fetch_paid_body(text: str, voice: str) -> dict:
+def _fetch_paid_body(text: str, voice: str, attempt: int = 0) -> dict:
     """This chunk's parsed JSON body: from the response cache, or upstream.
 
     Cached under `paid_ts`, never the older plain-WAV `paid` key, so a body
@@ -316,7 +330,8 @@ def _fetch_paid_body(text: str, voice: str) -> dict:
     cache hit needs no API key, as before.
     """
     variant = voices.variant(voice)
-    cached = response_cache.read(text, "paid_ts", variant)
+    endpoint = _cache_endpoint("paid_ts", attempt)
+    cached = response_cache.read(text, endpoint, variant)
     if cached is not None:
         return json.loads(cached)
 
@@ -335,15 +350,15 @@ def _fetch_paid_body(text: str, voice: str) -> dict:
         PAID_URL, json=payload, headers={"x-api-key": KURDISH_TTS_API_KEY}, timeout=REQUEST_TIMEOUT
     )
     response.raise_for_status()
-    response_cache.write(text, "paid_ts", response.content, "application/json", variant)
+    response_cache.write(text, endpoint, response.content, "application/json", variant)
     return response.json()
 
 
-def _synthesize_paid(text: str, voice: str = voices.DEFAULT_VOICE) -> PaidAudio:
+def _synthesize_paid(text: str, voice: str = voices.DEFAULT_VOICE, attempt: int = 0) -> PaidAudio:
     """Synthesize one chunk via the authenticated endpoint, with word
     timestamps requested (`include_timestamps`), so the answer is JSON, not
     a bare WAV."""
-    body = _fetch_paid_body(text, voice)
+    body = _fetch_paid_body(text, voice, attempt)
     if body.get("generation", {}).get("collapsed"):
         raise RuntimeError("Authenticated endpoint reported a collapsed generation")
 
@@ -557,41 +572,89 @@ class ChunkAudio:
     voice: str | None = None  # only set when the response itself reported one
 
 
-def _paid_chunk(index: int, text: str, voice: str) -> ChunkAudio:
-    result = _synthesize_paid(text, voice)
-    cache_key = response_cache.key(text, "paid_ts", voices.variant(voice))
+def _paid_chunk(index: int, text: str, voice: str, attempt: int = 0) -> ChunkAudio:
+    # Attempt 0 is called exactly as before the check existed.
+    result = _synthesize_paid(text, voice, attempt) if attempt else _synthesize_paid(text, voice)
+    cache_key = response_cache.key(text, _cache_endpoint("paid_ts", attempt), voices.variant(voice))
     return ChunkAudio(
         index, text, "paid", cache_key, result.audio, result.words, result.generation, result.voice
     )
 
 
-def _free_chunk(index: int, text: str, voice: str) -> ChunkAudio:
-    """The free endpoint; when it stays rate-limited, the paid one if it can."""
+def _free_chunk(index: int, text: str, voice: str, attempt: int = 0) -> ChunkAudio:
+    """The free endpoint; when it stays rate-limited, the paid one if it can.
+
+    A check retry (`attempt` above 0) never falls through: it gives up.
+    """
     try:
-        result = _synthesize_free(text, voice)
+        result = _synthesize_free(text, voice, attempt) if attempt else _synthesize_free(text, voice)
     except RateLimited:
-        if not (KURDISH_TTS_API_KEY and voices.accepts_paid(voice)):
+        if attempt or not (KURDISH_TTS_API_KEY and voices.accepts_paid(voice)):
             raise
         log(f"  chunk {index + 1}: free endpoint rate-limited, asking the authenticated one")
         return _paid_chunk(index, text, voice)
-    cache_key = response_cache.key(text, "free", voices.variant(voice))
+    cache_key = response_cache.key(text, _cache_endpoint("free", attempt), voices.variant(voice))
     return ChunkAudio(index, text, "free", cache_key, result.audio, result.words)
 
 
-def _synthesize_chunk(index: int, text: str, voice: str = voices.DEFAULT_VOICE) -> ChunkAudio:
+def _synthesize_chunk(index: int, text: str, voice: str = voices.DEFAULT_VOICE, attempt: int = 0) -> ChunkAudio:
     """Route one chunk to the free or authenticated endpoint by length."""
     use_paid = len(text) > FREE_CHAR_LIMIT
     log(f"  chunk {index + 1}: {len(text)} chars via {'authenticated' if use_paid else 'free'} endpoint")
 
     start = time.perf_counter()
-    chunk = _paid_chunk(index, text, voice) if use_paid else _free_chunk(index, text, voice)
+    if use_paid:
+        chunk = _paid_chunk(index, text, voice, attempt)
+    else:
+        chunk = _free_chunk(index, text, voice, attempt)
     elapsed = time.perf_counter() - start
     log(f"  chunk {index + 1}: done in {elapsed:.3f}s ({len(chunk.audio)}ms audio)")
     return chunk
 
 
-def _write_alignment(text: str, voice: str, chunk_results: list, merged: MergedAudio) -> None:
-    """Build and save this clip's alignment manifest. Never raises: a
+def _chunk_reasons(chunk: ChunkAudio, voice: str) -> list:
+    """`alignment_check.reasons` for one chunk, cleaned as it would be alone.
+
+    The chunk is trimmed and placed exactly as in a clip of its own; its
+    reasons depend only on its own sound and words, so they hold for the
+    merged clip too.
+    """
+    if not chunk.words:
+        return []
+    merged = _merge_segments([chunk.audio], trim_rule(voice), [chunk.words])
+    plan, start = merged.trim_plans[0], merged.chunk_starts_ms[0]
+    words = alignment._map_words(chunk.words, plan, alignment.piece_starts(start, plan))
+    span = (start, start + sum(end - begin for begin, end in plan))
+    return alignment_check.reasons(words, span, _sound_islands(merged.audio))
+
+
+def _checked_chunk(index: int, text: str, voice: str) -> tuple:
+    """One chunk, synthesised again while its word times fail the check.
+
+    Returns (the kept ChunkAudio, attempts made). Keeps the first attempt
+    that passes, else the one with fewest reasons (the earliest on a tie).
+    A retry that is rate-limited or fails ends the retries; it never loops.
+    """
+    best = _synthesize_chunk(index, text, voice)
+    best_reasons, attempts = _chunk_reasons(best, voice), 1
+    while best_reasons and attempts <= MAX_CHECK_RETRIES:
+        log(f"  chunk {index + 1}: word times fail the check {[r['code'] for r in best_reasons]}, asking again")
+        try:
+            candidate = _synthesize_chunk(index, text, voice, attempt=attempts)
+        except (RateLimited, requests.exceptions.RequestException, RuntimeError) as error:
+            log(f"  chunk {index + 1}: retry {attempts} gave up: {error}")
+            break
+        attempts += 1
+        reasons = _chunk_reasons(candidate, voice)
+        if len(reasons) < len(best_reasons):
+            best, best_reasons = candidate, reasons
+    return best, attempts
+
+
+def _write_alignment(
+    text: str, voice: str, chunk_results: list, merged: MergedAudio, attempts: list | None = None, regenerated: bool = False
+) -> None:
+    """Build, check and save this clip's alignment manifest. Never raises: a
     manifest problem must never fail the request that made the clip."""
     try:
         chunk_infos = [
@@ -612,6 +675,7 @@ def _write_alignment(text: str, voice: str, chunk_results: list, merged: MergedA
         manifest = alignment.build(
             text, text_hash(text), AUDIO_VERSION, voices.variant(voice), len(merged.audio), chunk_infos
         )
+        alignment_check.apply(manifest, _sound_islands(merged.audio), attempts, regenerated)
         alignment.write(text_hash(text), AUDIO_VERSION, manifest, voice)
     except Exception as error:
         # Loud: every clip must have a manifest. The clip itself still
@@ -620,7 +684,9 @@ def _write_alignment(text: str, voice: str, chunk_results: list, merged: MergedA
         log(f"✗ Could not write alignment manifest for this clip: {error}")
 
 
-def call_kurdish_tts_api(text: str, output_path: Path, voice: str = voices.DEFAULT_VOICE) -> bool:
+def call_kurdish_tts_api(
+    text: str, output_path: Path, voice: str = voices.DEFAULT_VOICE, regenerated: bool = False
+) -> bool:
     """
     Call the Kurdish TTS API, splitting long text across parallel requests.
 
@@ -634,6 +700,8 @@ def call_kurdish_tts_api(text: str, output_path: Path, voice: str = voices.DEFAU
         text: The text to convert to speech
         output_path: Path where the audio file should be saved
         voice: A voice id from `app/voices.py`; the default when left out
+        regenerated: this clip replaces a cached one the check found stray
+            sound in; recorded in the manifest so it is never replaced again
 
     Returns:
         True if successful, False otherwise
@@ -659,15 +727,16 @@ def call_kurdish_tts_api(text: str, output_path: Path, voice: str = voices.DEFAU
             return False
 
         if len(chunks) == 1:
-            chunk_results = [_synthesize_chunk(0, chunks[0], voice)]
+            checked = [_checked_chunk(0, chunks[0], voice)]
         else:
             workers = min(len(chunks), MAX_PARALLEL_CHUNKS)
             log(f"Generating {len(chunks)} chunks with {workers} parallel workers")
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 # executor.map preserves input order and re-raises failures.
-                chunk_results = list(
-                    executor.map(_synthesize_chunk, range(len(chunks)), chunks, [voice] * len(chunks))
+                checked = list(
+                    executor.map(_checked_chunk, range(len(chunks)), chunks, [voice] * len(chunks))
                 )
+        chunk_results = [chunk for chunk, _ in checked]
 
         merged = _merge_segments(
             [result.audio for result in chunk_results],
@@ -675,7 +744,7 @@ def call_kurdish_tts_api(text: str, output_path: Path, voice: str = voices.DEFAU
             [result.words for result in chunk_results],
         )
         merged.audio.export(str(output_path), format="mp3", bitrate="128k")
-        _write_alignment(text, voice, chunk_results, merged)
+        _write_alignment(text, voice, chunk_results, merged, [n for _, n in checked], regenerated)
 
         file_size = os.path.getsize(output_path)
         elapsed = time.perf_counter() - start_time

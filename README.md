@@ -219,9 +219,14 @@ Health check endpoint.
   "status": "healthy",
   "audio_version": 6,
   "cache": { "current": 120, "stale": 0 },
-  "tts_model_loaded": true
+  "tts_model_loaded": true,
+  "alignment_check": { "version": 1, "checked": 118, "failed": 2, "pending": 0 }
 }
 ```
+
+`alignment_check` counts the manifests of the current audio version by the
+[Alignment Check](#alignment-check): `pending` is how many the startup sweep
+has still to reach, `failed` how many have a chunk whose words are withheld.
 
 ### `GET /alignment`
 
@@ -394,8 +399,46 @@ is generated clean.
 
 `GET /alignment?text=...&audio_version=N` returns a manifest as JSON, or
 `404` if there is not one (`audio_version` is optional, default the current
-one). Additive and read-only: no existing route's response changes by a
-byte, and the app does not call it yet.
+one). A manifest of the current version is checked before it is served
+(below).
+
+### Alignment Check
+
+The app lights each word as it is spoken, from the manifest. A word lit at
+the wrong moment is worse than none, so every chunk's word times are held
+against the clip's own sound islands (`app/alignment_check.py`, measured on
+79 cached clips, 2026-10-02). A chunk fails when:
+
+- a word is shorter than 30 ms (`short_word`; the engine sometimes reports 0 ms);
+- a word's span holds no sound (`silent_word`);
+- an island longer than 25 ms starts more than 300 ms after the last word ends
+  (`sound_after_words`; a final stop's release stands within about 110 ms);
+- the words end more than 520 ms before the chunk's audio does (`words_end_early`,
+  the app's 600 ms from `clip_ms` less the 80 ms lead-out).
+
+A failing chunk gets `words: null` (the app lights the whole line) and keeps
+the engine's words under `rejected_words`, with `rejected_reasons`. Every
+manifest carries `check`: `version`, `ok`, `reasons` (each with its `chunk`),
+`attempts` per chunk and `regenerated`.
+
+- **At generation** a failing chunk is synthesised again past the response
+  cache (its body is saved under `free.r1`, `free.r2`, ...), at most twice,
+  never waiting out a 429 and never falling through to the paid endpoint;
+  the first attempt that passes is kept, else the one with fewest reasons.
+- **Clips cached before the check** are checked from their mp3 alone, never
+  upstream: lazily, when `/alignment` (or `/tts` for a voice other than the
+  default) reads one, and by a sweep `wsgi.py` starts in the background at
+  boot. The sweep takes a lock file so one worker runs it, skips any manifest
+  whose `check.version` is current, and replaces each manifest by an atomic
+  rename. About 150 ms a clip: a cache of 2341 takes some six to eight minutes.
+- **A cast clip with stray sound** after its words (`sound_after_words` or
+  `words_end_early`, a voice other than `kurmanji_236`) is made again on its
+  next `/tts` request, once: the new manifest says `regenerated: true` and is
+  never replaced again. A default-voice clip is never made again by the
+  check; only its words are withheld.
+
+Bump `alignment_check.VERSION` when a rule changes: every manifest is
+checked again, lazily and by the sweep.
 
 ### Async Processing
 

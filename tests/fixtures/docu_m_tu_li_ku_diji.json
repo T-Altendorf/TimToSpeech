@@ -1,0 +1,78 @@
+{
+ "source": "GET /alignment on tts.oelngatikameie.de, 2026-10-02; islands from the decoded cached mp3",
+ "voice": "studio_docu_m",
+ "islands": [
+  [
+   60,
+   1010
+  ],
+  [
+   1365,
+   1850
+  ]
+ ],
+ "manifest": {
+  "audio_version": 6,
+  "chunks": [
+   {
+    "endpoint": "free",
+    "generation": null,
+    "index": 0,
+    "pieces": [
+     {
+      "clip_start_ms": 50,
+      "raw_end_ms": 1840,
+      "raw_start_ms": 0
+     }
+    ],
+    "raw_ms": 5649,
+    "response_key": "2ed1dde6ba8b1961ebc0d33240ce494f1a1f87fe28b4e22af1dd2bfe73289ad5.free",
+    "text": "Tu li ku dijî?",
+    "voice": null,
+    "words": [
+     {
+      "alignment_quality": "forced_align",
+      "end_ms": 130,
+      "probability": 0.0,
+      "raw_end_ms": 80,
+      "raw_start_ms": 0,
+      "start_ms": 50,
+      "word": "Tu"
+     },
+     {
+      "alignment_quality": "forced_align",
+      "end_ms": 270,
+      "probability": 0.0,
+      "raw_end_ms": 220,
+      "raw_start_ms": 80,
+      "start_ms": 130,
+      "word": "li"
+     },
+     {
+      "alignment_quality": "forced_align",
+      "end_ms": 270,
+      "probability": 0.0,
+      "raw_end_ms": 220,
+      "raw_start_ms": 220,
+      "start_ms": 270,
+      "word": "ku"
+     },
+     {
+      "alignment_quality": "forced_align",
+      "end_ms": 970,
+      "probability": 0.0,
+      "raw_end_ms": 920,
+      "raw_start_ms": 220,
+      "start_ms": 270,
+      "word": "dijî?"
+     }
+    ]
+   }
+  ],
+  "clip_ms": 1970,
+  "schema": 1,
+  "text": "Tu li ku dijî?",
+  "timeline": "pcm_before_mp3_encoding",
+  "variant": "kurmanji/studio_docu_m"
+ }
+}
