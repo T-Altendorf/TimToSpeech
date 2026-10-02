@@ -118,13 +118,14 @@ Convert text to speech.
 **Query Parameters:**
 
 - `text` (required): The Kurmanji text to convert to speech
-- `force_regen` (optional): If true (`1`, `true`, `yes`, `on`), delete cached audio for this exact text and regenerate
+- `voice` (optional): a voice id from the table below; the default when left out
+- `force_regen` (optional): If true (`1`, `true`, `yes`, `on`), delete this voice's cached audio for this exact text and regenerate
 
 **Response:**
 
 - `200 OK`: Returns MP3 audio file (from cache if available)
 - `202 Accepted`: Generation started, returns job info for polling
-- `400 Bad Request`: Missing or invalid text parameter
+- `400 Bad Request`: Missing or invalid text parameter, or a voice not in the table (the body lists `allowed_voices`)
 
 **Example:**
 
@@ -154,7 +155,22 @@ For first-time generation of complex text, the service may take time. The endpoi
 - Texts up to 150 characters go to the free Kurdish TTS endpoint (https://www.kurdishtts.com/api/tts-demo) in a single request
 - Longer texts are split on sentence boundaries and packed back into chunks of at most 150 characters, which are generated in parallel and stitched into one seamless track
 - Only a single sentence longer than 150 characters goes to the authenticated endpoint (https://www.kurdishtts.com/api/tts-proxy), which needs `KURDISH_TTS_API_KEY`
-- If the Kurdish TTS API fails, the service automatically falls back to the local model
+- A 429 from the free endpoint is retried inside the job (waits of 5, 10, 20, 40 and 60 s), then the chunk goes to the authenticated endpoint if a key is set and the voice is allowed there
+- If the Kurdish TTS API fails, the default voice falls back to the local model; any other voice fails the job, since the local model has only the one voice
+
+**Voices** (`app/voices.py`, the one table; an allow-list):
+
+| voice | engine model | authenticated endpoint |
+| --- | --- | --- |
+| `kurmanji_236` (default) | v4 | yes |
+| `studio_elder_m` | v5 | no |
+| `studio_docu_m` | v5 | no |
+| `studio_host_f` | v5 | no |
+| `studio_teacher_f` | v5 | no |
+
+The authenticated endpoint answers 403 "TTS v5 requires a paid API plan" for the v5 voices on the current key (2026-10-02), so they stay on the free endpoint: a sentence over 150 characters is split on words instead.
+
+The default voice keeps every key it had: clip `cache/{sha256(text)}.a{v}.mp3`, manifest `cache/alignments/{sha256(text)}.a{v}.json`, response cache variant `kurmanji/kurmanji_236`. Any other voice carries its id: clip `{sha256(text)}.{voice}.a{v}.mp3`, manifest `{sha256(text)}.{voice}.a{v}.json`, response cache variant `kurmanji/{voice}`. `GET /alignment` takes the same `voice`, and `/health` lists the voices.
 
 **Example with polling:**
 
