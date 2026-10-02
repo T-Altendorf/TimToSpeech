@@ -11,7 +11,7 @@ from flask_cors import CORS
 from .config import log, CACHE_DIR, TTS_WAIT_TIMEOUT, CORS_ORIGINS
 from .utils import AUDIO_VERSION, cache_counts, get_cache_path, prune_stale_cache, text_hash
 from .tts_local import load_models, generate_audio
-from . import alignment, tts_local
+from . import alignment, tts_local, voices
 from .tts_api import call_kurdish_tts_api
 
 app = Flask(__name__)
@@ -26,7 +26,9 @@ if _pruned:
 processing_jobs = {}
 
 
-def generate_tts_async(job_id: str, text: str, output_path: str, use_api: bool):
+def generate_tts_async(
+    job_id: str, text: str, output_path: str, use_api: bool, voice: str = voices.DEFAULT_VOICE
+):
     """
     Wrapper for async TTS generation (either API or local model)
 
@@ -35,15 +37,20 @@ def generate_tts_async(job_id: str, text: str, output_path: str, use_api: bool):
         text: The text to convert to speech
         output_path: Path where the audio file should be saved
         use_api: If True, try Kurdish TTS API; if False, use local model
+        voice: A voice id from `app/voices.py`. Only the default voice falls
+            back to the local model: it has one voice, and a fallback clip
+            saved under another voice's name would be a lie in the cache.
     """
     processing_jobs[job_id] = {"status": "processing", "path": None}
 
     success = False
     if use_api:
-        success = call_kurdish_tts_api(text, output_path)
-        if not success:
+        success = call_kurdish_tts_api(text, output_path, voice)
+        if not success and voice == voices.DEFAULT_VOICE:
             log("Kurdish TTS API failed, falling back to local model")
             success = generate_audio(text, output_path)
+        elif not success:
+            log(f"Kurdish TTS API failed for voice {voice}; no local fallback for it")
     else:
         success = generate_audio(text, output_path)
 
@@ -51,6 +58,15 @@ def generate_tts_async(job_id: str, text: str, output_path: str, use_api: bool):
         processing_jobs[job_id] = {"status": "completed", "path": str(output_path)}
     else:
         processing_jobs[job_id] = {"status": "failed", "path": None}
+
+
+def _requested_voice() -> tuple:
+    """The `voice` query parameter, resolved: (voice, None), or (None, a 400)."""
+    try:
+        return voices.resolve(request.args.get("voice")), None
+    except voices.UnknownVoice as error:
+        refusal = {"error": f"Unknown voice '{error}'", "allowed_voices": voices.allowed()}
+        return None, (jsonify(refusal), 400)
 
 
 @app.route("/tts", methods=["GET"])
@@ -61,7 +77,9 @@ def text_to_speech():
     chunks; falls back to the local TTS model if the API fails
     Query parameters:
       - text: The text to convert to speech (required)
-      - force_regen: If true, delete cached audio for this text and regenerate
+      - voice: a voice id from `app/voices.py` (default kurmanji_236); any
+        other id is a 400 with the allowed ones
+      - force_regen: If true, delete this voice's cached audio for this text and regenerate
     """
     text = request.args.get("text", "").strip()
     force_regen = request.args.get("force_regen", "").strip().lower() in {
@@ -73,9 +91,12 @@ def text_to_speech():
 
     if not text:
         return jsonify({"error": "Please provide 'text' parameter"}), 400
+    voice, refused = _requested_voice()
+    if refused:
+        return refused
 
     # Check cache
-    cache_path = get_cache_path(text)
+    cache_path = get_cache_path(text, voice)
     if force_regen and cache_path.exists():
         try:
             cache_path.unlink()
@@ -85,7 +106,7 @@ def text_to_speech():
             return jsonify({"error": "Failed to invalidate cache"}), 500
 
     if cache_path.exists():
-        if alignment.exists(text_hash(text), AUDIO_VERSION):
+        if alignment.exists(text_hash(text), AUDIO_VERSION, voice):
             log(f"Cache hit for text: '{text[:50]}...'")
             return send_file(cache_path, mimetype="audio/mpeg")
         # Every clip must have a manifest (2026-09-19). One that does not is
@@ -104,7 +125,7 @@ def text_to_speech():
     job_id = hashlib.sha256(f"{text}{os.urandom(8).hex()}".encode()).hexdigest()[:16]
 
     # Start async generation
-    thread = Thread(target=generate_tts_async, args=(job_id, text, cache_path, use_api))
+    thread = Thread(target=generate_tts_async, args=(job_id, text, cache_path, use_api, voice))
     thread.daemon = True
     thread.start()
 
@@ -152,10 +173,14 @@ def get_alignment():
     Query parameters:
       - text: the exact text the clip was generated from (required)
       - audio_version: which pipeline version's manifest to read (default: current)
+      - voice: whose clip's manifest (default kurmanji_236)
     """
     text = request.args.get("text", "").strip()
     if not text:
         return jsonify({"error": "Please provide 'text' parameter"}), 400
+    voice, refused = _requested_voice()
+    if refused:
+        return refused
 
     version_param = request.args.get("audio_version", "").strip()
     try:
@@ -163,7 +188,7 @@ def get_alignment():
     except ValueError:
         return jsonify({"error": "'audio_version' must be an integer"}), 400
 
-    manifest = alignment.read(text_hash(text), version)
+    manifest = alignment.read(text_hash(text), version, voice)
     if manifest is None:
         return jsonify({"error": "No alignment manifest for this text"}), 404
     return jsonify(manifest)
@@ -185,6 +210,8 @@ def health():
             "audio_version": AUDIO_VERSION,
             # `stale` must read 0: clips of an older version are deleted at start.
             "cache": cache_counts(),
+            "default_voice": voices.DEFAULT_VOICE,
+            "voices": {voice: voices.model_version(voice) for voice in voices.allowed()},
             "tts_model_loaded": tts_local.model is not None
             and tts_local.tokenizer is not None,
         }

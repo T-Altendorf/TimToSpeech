@@ -2,6 +2,7 @@ import re
 import hashlib
 from pathlib import Path
 from .config import CACHE_DIR
+from . import voices
 
 # Numbers to words mapping
 num2word = {
@@ -127,9 +128,13 @@ def text_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def get_cache_path(text: str) -> Path:
-    """Generate cache file path based on text hash and the audio version"""
-    return CACHE_DIR / f"{text_hash(text)}{_cache_suffix()}"
+def get_cache_path(text: str, voice: str = voices.DEFAULT_VOICE) -> Path:
+    """The clip's path: text hash, the voice (none for the default), audio version.
+
+    `{hash}.a{v}.mp3` for the default voice, `{hash}.{voice}.a{v}.mp3` for any
+    other. Both end in `.a{v}.mp3`, which is all pruning and counting test.
+    """
+    return CACHE_DIR / f"{text_hash(text)}{voices.file_tag(voice)}{_cache_suffix()}"
 
 
 def _cache_suffix() -> str:

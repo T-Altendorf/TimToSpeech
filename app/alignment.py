@@ -17,13 +17,15 @@ import json
 from pathlib import Path
 
 from .config import CACHE_DIR, log
+from . import voices
 
 ALIGNMENT_DIR = CACHE_DIR / "alignments"
 SCHEMA = 1
 
 
-def path_for(text_hash: str, audio_version: int) -> Path:
-    return ALIGNMENT_DIR / f"{text_hash}.a{audio_version}.json"
+def path_for(text_hash: str, audio_version: int, voice: str = voices.DEFAULT_VOICE) -> Path:
+    """`{hash}.a{v}.json` for the default voice, `{hash}.{voice}.a{v}.json` otherwise."""
+    return ALIGNMENT_DIR / f"{text_hash}{voices.file_tag(voice)}.a{audio_version}.json"
 
 
 def map_raw_ms(raw_ms: float, plan: list, piece_starts: list) -> int:
@@ -116,27 +118,27 @@ def build(text: str, text_hash: str, audio_version: int, variant: str, clip_ms: 
     }
 
 
-def write(text_hash: str, audio_version: int, manifest: dict) -> None:
+def write(text_hash: str, audio_version: int, manifest: dict, voice: str = voices.DEFAULT_VOICE) -> None:
     """Save a manifest. Never raises: a write failure must not fail the clip."""
     try:
         ALIGNMENT_DIR.mkdir(parents=True, exist_ok=True)
-        path_for(text_hash, audio_version).write_text(json.dumps(manifest))
+        path_for(text_hash, audio_version, voice).write_text(json.dumps(manifest))
     except OSError as error:
         log(f"Could not write alignment manifest for {text_hash}: {error}")
 
 
-def read(text_hash: str, audio_version: int) -> dict | None:
+def read(text_hash: str, audio_version: int, voice: str = voices.DEFAULT_VOICE) -> dict | None:
     """A previously written manifest, or None if there is not one."""
     try:
-        return json.loads(path_for(text_hash, audio_version).read_text())
+        return json.loads(path_for(text_hash, audio_version, voice).read_text())
     except (FileNotFoundError, json.JSONDecodeError):
         return None
 
 
-def exists(text_hash: str, audio_version: int) -> bool:
+def exists(text_hash: str, audio_version: int, voice: str = voices.DEFAULT_VOICE) -> bool:
     """Whether a manifest was written for this clip.
 
     Every clip must have one (2026-09-19); a cached mp3 without a matching
     manifest is not a valid cache entry.
     """
-    return path_for(text_hash, audio_version).exists()
+    return path_for(text_hash, audio_version, voice).exists()

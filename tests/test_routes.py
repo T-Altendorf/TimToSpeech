@@ -96,7 +96,7 @@ class ManifestGatedCacheHitTest(unittest.TestCase):
         cache_path = utils.get_cache_path(text)
         cache_path.write_bytes(b"orphaned-mp3-no-manifest")
 
-        def fake_generate(text, output_path):
+        def fake_generate(text, output_path, voice):
             Path(output_path).write_bytes(b"freshly-generated-mp3")
             return True
 

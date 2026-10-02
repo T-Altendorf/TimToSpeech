@@ -50,6 +50,8 @@ def _sse_body(pcm: bytes) -> bytes:
 
 
 class _FakeJsonResponse:
+    status_code = 200
+
     def __init__(self, body: bytes):
         self.content = body
 
@@ -61,6 +63,8 @@ class _FakeJsonResponse:
 
 
 class _FakeSseResponse:
+    status_code = 200
+
     def __init__(self, body: bytes):
         self._lines = body.split(b"\n")
 
@@ -102,7 +106,7 @@ class PaidTimestampsTest(unittest.TestCase):
                 t._synthesize_paid("a long sentence over the free limit")
 
     def test_old_wav_cache_under_plain_paid_is_not_used(self):
-        response_cache.write("long sentence", "paid", b"RIFF....WAVEfmt ", "audio/wav", t.CACHE_VARIANT)
+        response_cache.write("long sentence", "paid", b"RIFF....WAVEfmt ", "audio/wav", "kurmanji/kurmanji_236")
         body = _paid_body(_pcm(150), [{"word": "du", "start": 0.0, "end": 0.1}])
         with mock.patch.object(t.requests, "post", return_value=_FakeJsonResponse(body)) as post, \
                 mock.patch.object(t, "KURDISH_TTS_API_KEY", "a-key"):
@@ -125,7 +129,7 @@ class PaidTimestampsTest(unittest.TestCase):
         from app import alignment
 
         manifest = alignment.build(
-            "long sentence", "hash", t.AUDIO_VERSION, t.CACHE_VARIANT, len(merged.audio),
+            "long sentence", "hash", t.AUDIO_VERSION, "kurmanji/kurmanji_236", len(merged.audio),
             [{
                 "index": 0, "text": chunk.text, "endpoint": chunk.endpoint,
                 "response_key": chunk.response_key, "raw_ms": len(chunk.audio),
@@ -153,16 +157,16 @@ class VoiceConsistencyTest(unittest.TestCase):
         with mock.patch.object(t.requests, "post", return_value=_FakeSseResponse(_sse_body(_pcm(50, 22050)))) as post:
             t._synthesize_free("test free voice")
         free_payload = post.call_args.kwargs["json"]
-        self.assertEqual(free_payload["voice"], t.VOICE)
-        self.assertEqual(free_payload["model_version"], t.MODEL_VERSION)
+        self.assertEqual(free_payload["voice"], "kurmanji_236")
+        self.assertEqual(free_payload["model_version"], "v4")
 
         body = _paid_body(_pcm(50), [])
         with mock.patch.object(t.requests, "post", return_value=_FakeJsonResponse(body)) as post, \
                 mock.patch.object(t, "KURDISH_TTS_API_KEY", "a-key"):
             t._synthesize_paid("test paid voice, a long enough sentence to be routed here")
         paid_payload = post.call_args.kwargs["json"]
-        self.assertEqual(paid_payload["speaker_id"], t.VOICE)
-        self.assertEqual(paid_payload["model_version"], t.MODEL_VERSION)
+        self.assertEqual(paid_payload["speaker_id"], "kurmanji_236")
+        self.assertEqual(paid_payload["model_version"], "v4")
         self.assertEqual(free_payload["voice"], paid_payload["speaker_id"])
         self.assertEqual(free_payload["model_version"], paid_payload["model_version"])
 
