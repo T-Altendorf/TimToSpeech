@@ -8,6 +8,7 @@ from threading import Thread
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 
+from . import config, stt_api
 from .config import log, CACHE_DIR, TTS_WAIT_TIMEOUT, CORS_ORIGINS
 from .utils import AUDIO_VERSION, cache_counts, get_cache_path, prune_stale_cache, text_hash
 from .tts_local import load_models, generate_audio
@@ -236,6 +237,24 @@ def get_alignment():
     return jsonify(manifest)
 
 
+@app.route("/stt", methods=["POST"])
+def speech_to_text():
+    """Transcribe one clip. Multipart `file` and `course` (kmr or heb); one
+    answer shape for every engine (`app/stt_api.py`). Nothing is cached."""
+    course = request.form.get("course", "").strip()
+    upload = request.files.get("file")
+    if course not in stt_api.COURSES:
+        return jsonify({"error": "'course' must be kmr or heb"}), 400
+    if upload is None:
+        return jsonify({"error": "Please send a 'file' field"}), 400
+    data = upload.read(stt_api.MAX_CLIP_BYTES + 1)
+    try:
+        answer = stt_api.transcribe(course, upload.filename or "clip", data, upload.mimetype)
+    except stt_api.SttError as error:
+        return jsonify(error.body), error.status
+    return jsonify(answer)
+
+
 @app.route("/favicon.ico")
 def favicon():
     return "", 204  # 204 = No Content
@@ -259,6 +278,8 @@ def health():
             # version, checked, failed, pending: `pending` falls to 0 once the
             # startup sweep is through (`app/alignment_sweep.py`).
             "alignment_check": alignment_sweep.health(),
+            # Whether each course's speech engine has its key here.
+            "stt": {"kmr": bool(config.KURDISH_TTS_STT_KEY)},
         }
     )
 

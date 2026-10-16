@@ -220,6 +220,7 @@ Health check endpoint.
   "audio_version": 6,
   "cache": { "current": 120, "stale": 0 },
   "tts_model_loaded": true,
+  "stt": { "kmr": true },
   "alignment_check": { "version": 1, "checked": 118, "failed": 2, "pending": 0 }
 }
 ```
@@ -227,6 +228,18 @@ Health check endpoint.
 `alignment_check` counts the manifests of the current audio version by the
 [Alignment Check](#alignment-check): `pending` is how many the startup sweep
 has still to reach, `failed` how many have a chunk whose words are withheld.
+
+### `POST /stt`
+
+Speech to text, one door for every course. Multipart form with `file` (wav, mp3, flac, ogg or m4a, at most 10 MB) and `course` (`kmr` or `heb`). Nothing is cached, and only counts and durations are logged, never the transcript.
+
+For `kmr` the clip goes to kurdishtts.com's STT with `dialect=kurmanji`, using `KURDISH_TTS_STT_KEY`. The answer has one shape for every engine:
+
+```json
+{ "text": "...", "engine": "kurdishtts", "course": "kmr", "truncated": false, "raw": { "...": "the engine's own fields" } }
+```
+
+Errors: `400` bad course or no file, `413` clip over 10 MB, `501` for `heb` (no engine yet), `503` key not set, `504` engine timed out, and an engine error keeps its own status and body. Each engine is one function in `app/stt_api.py`, chosen by course.
 
 ### `GET /alignment`
 
@@ -265,6 +278,7 @@ cp .env.example .env
 - `PORT`: Port number for the Flask service (default: `8000`)
 - `TTS_WAIT_TIMEOUT`: Maximum time in seconds to wait for TTS generation before returning a job ID for polling (default: `7.0`)
 - `HOST_PORT`: Port exposed on the host machine for local development (default: `8000`)
+- `KURDISH_TTS_STT_KEY`: The kurdishtts.com speech-to-text key for `/stt` (a separate key; the TTS key is refused there). `/health` shows `stt.kmr` true when it is set.
 - `CORS_ORIGINS`: Comma-separated list of origins allowed to call the API from a browser, or `*` for any (default: `*`). Needed for web clients such as Expo web on `http://localhost:8081`; native apps are not subject to CORS.
 
 ### Volume Persistence

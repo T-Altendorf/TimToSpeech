@@ -21,6 +21,9 @@ TTS_WAIT_TIMEOUT = float(os.getenv("TTS_WAIT_TIMEOUT", "7.0"))
 # Only needed for sentences longer than the free endpoint's 150 char limit
 KURDISH_TTS_API_KEY = os.getenv("KURDISH_TTS_API_KEY", "").strip()
 
+# The speech-to-text key at kurdishtts.com: a separate key, the TTS key gets 401 there.
+KURDISH_TTS_STT_KEY = os.getenv("KURDISH_TTS_STT_KEY", "").strip()
+
 # Browser clients (Expo web, web frontends) need CORS headers to read responses.
 # Comma-separated list of allowed origins; "*" allows any.
 CORS_ORIGINS = [
