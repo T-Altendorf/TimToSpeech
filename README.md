@@ -120,6 +120,7 @@ Convert text to speech.
 - `text` (required): The Kurmanji text to convert to speech
 - `voice` (optional): a voice id from the table below; the default when left out
 - `force_regen` (optional): If true (`1`, `true`, `yes`, `on`), delete this voice's cached audio for this exact text and regenerate
+- `lane` (optional): `tap` for a clip the listener is waiting on, `warm` (the default; also anything else) for background prefetch. See "Lanes" below
 
 **Response:**
 
@@ -155,7 +156,15 @@ For first-time generation of complex text, the service may take time. The endpoi
 - Texts up to 150 characters go to the free Kurdish TTS endpoint (https://www.kurdishtts.com/api/tts-demo) in a single request
 - Longer texts are split on sentence boundaries and packed back into chunks of at most 150 characters, which are generated in parallel and stitched into one seamless track
 - Only a single sentence longer than 150 characters goes to the authenticated endpoint (https://www.kurdishtts.com/api/tts-proxy), which needs `KURDISH_TTS_API_KEY`
-- A 429 from the free endpoint is retried inside the job (waits of 5, 10, 20, 40 and 60 s), then the chunk goes to the authenticated endpoint if a key is set and the voice is allowed there
+- A 429 from the free endpoint is retried inside the job (waits of 5, 10, 20, 40 and 60 s), then the chunk goes to the authenticated endpoint if a key is set and the voice is allowed there. That is the warm lane; a tap does not wait (below)
+
+**Lanes** (`app/lanes.py`):
+
+- `warm`: one server-side queue drained by two worker threads; every free request first takes a token from a bucket sized under the measured limit (a burst of 2, then one token every 16 s; the endpoint answered 429 after about ten requests in two minutes on 2026-10-02)
+- `tap`: runs at once, never queued and never waiting for a token (it takes one if there is one, so warming backs off); one free try, and on a 429 straight to the authenticated endpoint when a key is set and the voice is allowed there
+- One job per text and voice while it is queued or running: a second request gets the same `job_id`. A tap on a queued warm job runs it now; a tap on a running one (say asleep in a 429 backoff) wakes it and its next step is the authenticated endpoint. Both requesters' polls resolve with the one result
+- Check retries keep their rule: one 429 ends them, never paid
+- Each 429 is logged with any `Retry-After`, `X-RateLimit-*` or `RateLimit-*` headers it carries; `/health` has `queue` (`warm_queued`, `running`, `free_tokens`)
 - If the Kurdish TTS API fails, the default voice falls back to the local model; any other voice fails the job, since the local model has only the one voice
 
 **Voices** (`app/voices.py`, the one table; an allow-list):

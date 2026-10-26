@@ -4,7 +4,6 @@ TimToSpeech - Lightweight TTS service for Kurmanji text
 """
 import os
 import hashlib
-from threading import Thread
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 
@@ -12,7 +11,7 @@ from . import config, stt_api
 from .config import log, CACHE_DIR, TTS_WAIT_TIMEOUT, CORS_ORIGINS
 from .utils import AUDIO_VERSION, cache_counts, get_cache_path, prune_stale_cache, text_hash
 from .tts_local import load_models, generate_audio
-from . import alignment, alignment_check, alignment_sweep, tts_local, voices
+from . import alignment, alignment_check, alignment_sweep, lanes, tts_local, voices
 from .tts_api import call_kurdish_tts_api
 
 app = Flask(__name__)
@@ -102,6 +101,21 @@ def _was_regenerated(text: str, voice: str) -> bool:
     return bool(manifest.get("check", {}).get("regenerated"))
 
 
+def _submit(text: str, voice: str, cache_path, regenerated: bool, job_id: str) -> lanes.Job:
+    """Hands the synthesis to its lane; the existing job when one is under way."""
+    lane = lanes.parse_lane(request.args.get("lane"))
+
+    def work(new_id: str) -> None:
+        generate_tts_async(new_id, text, cache_path, True, voice, regenerated)
+
+    processing_jobs.setdefault(job_id, {"status": "processing", "path": None})
+    job, created = lanes.JOBS.submit((text, voice), lane, job_id, work)
+    if not created:
+        processing_jobs.pop(job_id, None)
+        log(f"Joined job {job.job_id} ({lane}) for text: '{text[:50]}...'")
+    return job
+
+
 @app.route("/tts", methods=["GET"])
 def text_to_speech():
     """
@@ -113,6 +127,9 @@ def text_to_speech():
       - voice: a voice id from `app/voices.py` (default kurmanji_236); any
         other id is a 400 with the allowed ones
       - force_regen: If true, delete this voice's cached audio for this text and regenerate
+      - lane: `tap` (he is waiting on it: runs now, one free try, then paid) or
+        `warm` (the default, also for anything else: queued and paced;
+        `app/lanes.py`). One job per text and voice while it runs.
     """
     text = request.args.get("text", "").strip()
     force_regen = request.args.get("force_regen", "").strip().lower() in {
@@ -156,20 +173,18 @@ def text_to_speech():
             pass
 
     # The API handles any length now - long text is split into parallel chunks
-    use_api = True
     log(f"Text is {len(text)} characters, using Kurdish TTS API")
 
     # Generate job ID
     job_id = hashlib.sha256(f"{text}{os.urandom(8).hex()}".encode()).hexdigest()[:16]
 
-    # Start async generation
+    # One job per text and voice: a second request joins the first
     regenerated = regenerating or _was_regenerated(text, voice)
-    thread = Thread(target=generate_tts_async, args=(job_id, text, cache_path, use_api, voice, regenerated))
-    thread.daemon = True
-    thread.start()
+    job = _submit(text, voice, cache_path, regenerated, job_id)
 
     # Wait briefly to see if generation completes quickly
-    thread.join(timeout=TTS_WAIT_TIMEOUT)
+    job.done.wait(timeout=TTS_WAIT_TIMEOUT)
+    job_id = job.job_id
 
     if cache_path.exists():
         # Generation completed within timeout
@@ -280,6 +295,8 @@ def health():
             "alignment_check": alignment_sweep.health(),
             # Whether each course's speech engine has its key here.
             "stt": {"kmr": bool(config.KURDISH_TTS_STT_KEY)},
+            # warm_queued, running, free_tokens: counts only (`app/lanes.py`).
+            "queue": lanes.JOBS.counts(),
         }
     )
 

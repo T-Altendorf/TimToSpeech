@@ -7,13 +7,14 @@ import requests
 import traceback
 import json
 import base64
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 import numpy as np
 from pydub import AudioSegment
-from . import alignment, alignment_check, response_cache, voices
+from . import alignment, alignment_check, lanes, response_cache, voices
 from .config import log, KURDISH_TTS_API_KEY
 from .utils import AUDIO_VERSION, text_hash
 
@@ -244,22 +245,40 @@ class FreeAudio:
     words: list | None  # {word, start, end, alignment_quality, probability}, seconds
 
 
+def _rate_limit_headers(response) -> dict:
+    """The rate-limit headers a 429 carries, to learn the endpoint's real window."""
+    headers = getattr(response, "headers", None)
+    if not isinstance(headers, Mapping):
+        return {}
+    wanted = ("retry-after", "x-ratelimit-", "ratelimit-")
+    return {name: value for name, value in headers.items() if name.lower().startswith(wanted)}
+
+
 def _post_free(payload: dict, delays: tuple = FREE_RETRY_DELAYS_S):
     """One free request, retried on a 429 with the bounded backoff above.
 
     Raises `RateLimited` once every retry was answered 429; any other error
     status raises as before. A check retry passes no delays: one 429 raises.
+    In a job (`app/lanes.py`) each request first takes a bucket token, and
+    the backoff waits on the job's urgency event: a tap job, or a warm one a
+    tap upgraded, stops retrying and raises, so its chunk goes paid now.
     """
+    urgent = lanes.urgency()
     for delay in (*delays, None):
+        lanes.FREE_BUCKET.take(urgent)
         response = requests.post(FREE_URL, json=payload, timeout=REQUEST_TIMEOUT, stream=True)
         if response.status_code != HTTP_TOO_MANY_REQUESTS:
             response.raise_for_status()
             return response
+        log(f"  free endpoint 429 ({lanes.lane_name(urgent)}), headers: {_rate_limit_headers(response)}")
         response.close()
-        if delay is None:
+        if delay is None or lanes.is_urgent(urgent):
             break
         log(f"  free endpoint rate-limited (429), asking again in {delay}s")
-        time.sleep(delay)
+        if urgent is None:
+            time.sleep(delay)
+        elif urgent.wait(delay):
+            break
     raise RateLimited(f"free endpoint still rate-limited after {len(delays)} retries")
 
 
@@ -708,6 +727,7 @@ def call_kurdish_tts_api(
     """
     log("=== Kurdish TTS API Call Started ===")
     log(f"Input: '{text}'")
+    log(f"Lane: {lanes.lane_name(lanes.urgency())}")
     start_time = time.perf_counter()
 
     try:
@@ -734,7 +754,7 @@ def call_kurdish_tts_api(
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 # executor.map preserves input order and re-raises failures.
                 checked = list(
-                    executor.map(_checked_chunk, range(len(chunks)), chunks, [voice] * len(chunks))
+                    executor.map(lanes.carried(_checked_chunk), range(len(chunks)), chunks, [voice] * len(chunks))
                 )
         chunk_results = [chunk for chunk, _ in checked]
 
