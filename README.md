@@ -164,6 +164,7 @@ For first-time generation of complex text, the service may take time. The endpoi
 - `tap`: runs at once, never queued and never waiting for a token (it takes one if there is one, so warming backs off); one free try, and on a 429 straight to the authenticated endpoint when a key is set and the voice is allowed there
 - One job per text and voice while it is queued or running: a second request gets the same `job_id`. A tap on a queued warm job runs it now; a tap on a running one (say asleep in a 429 backoff) wakes it and its next step is the authenticated endpoint. Both requesters' polls resolve with the one result
 - Check retries keep their rule: one 429 ends them, never paid
+- `night`: bulk warming from a list, inside a nightly window, free endpoint only, yielding to both lanes above. See `POST /warm/bulk`
 - Each 429 is logged with any `Retry-After`, `X-RateLimit-*` or `RateLimit-*` headers it carries; `/health` has `queue` (`warm_queued`, `running`, `free_tokens`)
 - If the Kurdish TTS API fails, the default voice falls back to the local model; any other voice fails the job, since the local model has only the one voice
 
@@ -230,13 +231,61 @@ Health check endpoint.
   "cache": { "current": 120, "stale": 0 },
   "tts_model_loaded": true,
   "stt": { "kmr": true },
-  "alignment_check": { "version": 1, "checked": 118, "failed": 2, "pending": 0 }
+  "alignment_check": { "version": 1, "checked": 118, "failed": 2, "pending": 0 },
+  "queue": { "warm_queued": 0, "running": 0, "free_tokens": 2 },
+  "night": {
+    "listed": 5000, "done": 1200, "skipped": 40, "skipped_reasons": { "cached": 38, "too_long": 2 },
+    "failed": 1, "remaining": 3759, "in_window": true, "paused_reason": null
+  },
+  "upstream": {
+    "last_hour": { "free": { "requests": 220, "ok": 219, "rate_limited": 1, "forbidden": 0, "other_4xx": 0, "server_error": 0, "no_answer": 0 }, "paid": { "...": 0 } },
+    "since_start": { "free": { "...": 0 }, "paid": { "...": 0 } },
+    "free_429_streak": 0,
+    "last_429": { "endpoint": "free", "at": "2026-10-26T21:14:03+00:00", "headers": { "Retry-After": "60" } },
+    "warning": []
+  },
+  "attention": false
 }
 ```
+
+`night` is the night lane's progress (below); `paused_reason` is why it is not
+synthesising right now: `outside_window`, `empty`, `busy` (a tap or warm job is
+here), `bucket` (it leaves a token for the phone), `rate_limited` (its own 429,
+five minutes), `free_429_streak` (30 minutes) or `free_forbidden` (until the
+next window).
+
+`upstream` counts what the kurdishtts.com endpoints answered, over the last hour
+and since start. `warning` lists codes when the pattern looks like blocking
+rather than pacing (we pace under the measured limit, so any is unusual):
+`free_429_rate` (over 20% of at least 10 free requests in the hour were 429),
+`free_429_streak` (5 or more free 429s in a row), `free_forbidden` (any free
+401/403 in the hour), `paid_errors` (any paid 4xx/5xx in the hour). `status`
+stays `healthy` for the container healthcheck; `attention` is true when
+`warning` is not empty. Counts only, never a text.
 
 `alignment_check` counts the manifests of the current audio version by the
 [Alignment Check](#alignment-check): `pending` is how many the startup sweep
 has still to reach, `failed` how many have a chunk whose words are withheld.
+
+### `POST /warm/bulk` and `GET /warm/bulk`
+
+The night lane (`app/night.py`): a list of texts warmed one by one in the
+default voice while he sleeps. Both need `Authorization: Bearer <WARM_BULK_KEY>`
+(503 when the key is not set on the server, 401 when it is wrong).
+
+```bash
+curl -X POST https://tts.example/warm/bulk -H "Authorization: Bearer $WARM_BULK_KEY" \
+  -H "Content-Type: application/json" -d '{"texts": ["Silav", "Tu çawa yî?"], "mode": "append"}'
+# {"listed": 2, "added": 1, "already_listed": 0, "already_cached": 1, "total": 5001}
+```
+
+- `mode`: `append` (default) adds the texts not listed yet; `replace` starts a new list. Texts already cached are not listed. At most 50,000 texts and 2 MB per body
+- `GET` answers the `night` counts of `/health` plus `window` and `tz`; never a text
+- The list lives in `CACHE_DIR/night-queue.json`, written atomically, so a redeploy resumes it
+- One worker, only inside `NIGHT_WINDOW` in `NIGHT_TZ`; it starts nothing while a tap or warm job is queued or running, and only when the bucket is full, so the phone always has a token
+- Free endpoint only: a 429 is waited out (the usual backoff, then five minutes) and the text asked again, never sent to the paid endpoint; a text over 150 characters is skipped and counted. A tap on the text the night lane is on joins its job and makes it a tap
+- Pauses 30 minutes on `free_429_streak`, stops until the next window on `free_forbidden`
+- Logs one line per 50 clips done and when the window opens or closes; counts only
 
 ### `POST /stt`
 
@@ -288,6 +337,9 @@ cp .env.example .env
 - `TTS_WAIT_TIMEOUT`: Maximum time in seconds to wait for TTS generation before returning a job ID for polling (default: `7.0`)
 - `HOST_PORT`: Port exposed on the host machine for local development (default: `8000`)
 - `KURDISH_TTS_STT_KEY`: The kurdishtts.com speech-to-text key for `/stt` (a separate key; the TTS key is refused there). `/health` shows `stt.kmr` true when it is set.
+- `WARM_BULK_KEY`: Bearer key for `/warm/bulk`; unset, that endpoint answers 503.
+- `NIGHT_WINDOW`: When the night lane runs, `HH:MM-HH:MM` (may cross midnight) or `always` (default: `22:00-07:00`).
+- `NIGHT_TZ`: The window's time zone (default: `Europe/Berlin`).
 - `CORS_ORIGINS`: Comma-separated list of origins allowed to call the API from a browser, or `*` for any (default: `*`). Needed for web clients such as Expo web on `http://localhost:8081`; native apps are not subject to CORS.
 
 ### Volume Persistence

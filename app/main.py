@@ -11,11 +11,13 @@ from . import config, stt_api
 from .config import log, CACHE_DIR, TTS_WAIT_TIMEOUT, CORS_ORIGINS
 from .utils import AUDIO_VERSION, cache_counts, get_cache_path, prune_stale_cache, text_hash
 from .tts_local import load_models, generate_audio
-from . import alignment, alignment_check, alignment_sweep, lanes, tts_local, voices
+from . import alignment, alignment_check, alignment_sweep, lanes, night, tts_local, upstream, voices
+from .night_routes import bulk
 from .tts_api import call_kurdish_tts_api
 
 app = Flask(__name__)
 CORS(app, origins=CORS_ORIGINS)
+app.register_blueprint(bulk)
 
 # A new audio version retires every older clip the moment the service starts.
 _pruned = prune_stale_cache()
@@ -67,6 +69,25 @@ def generate_tts_async(
         processing_jobs[job_id] = {"status": "completed", "path": str(output_path)}
     else:
         processing_jobs[job_id] = {"status": "failed", "path": None}
+
+
+def night_synthesis(job_id: str, text: str, output_path) -> bool:
+    """The night lane's synthesis: the API only, never the local model (its
+    clip would be cached as the engine's), and a 429 raises `RateLimited`
+    to the lane. Polls of a request that joined the job see its status."""
+    processing_jobs[job_id] = {"status": "processing", "path": None}
+    ok = False
+    try:
+        ok = call_kurdish_tts_api(text, output_path, voices.DEFAULT_VOICE)
+    finally:
+        processing_jobs[job_id] = {"status": "completed", "path": str(output_path)} if ok else {
+            "status": "failed", "path": None}
+    return ok
+
+
+night.LANE.synth = night_synthesis
+if night.LANE.items.next_pending() is not None:
+    night.LANE.start()  # a redeploy resumes the list
 
 
 def _requested_voice() -> tuple:
@@ -277,7 +298,9 @@ def favicon():
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Health check endpoint"""
+    """Health check endpoint. `status` stays healthy (the container's
+    healthcheck reads it); `attention` is true when `upstream.warning` is not empty."""
+    upstream_health = upstream.UPSTREAM.health()
     return jsonify(
         {
             "status": "healthy",
@@ -297,6 +320,13 @@ def health():
             "stt": {"kmr": bool(config.KURDISH_TTS_STT_KEY)},
             # warm_queued, running, free_tokens: counts only (`app/lanes.py`).
             "queue": lanes.JOBS.counts(),
+            # listed, done, skipped, failed, remaining, in_window, paused_reason
+            # (`app/night.py`); counts only.
+            "night": night.LANE.health(),
+            # What the free and paid endpoints answered, and warning codes when
+            # it looks like blocking (`app/upstream.py`).
+            "upstream": upstream_health,
+            "attention": bool(upstream_health["warning"]),
         }
     )
 

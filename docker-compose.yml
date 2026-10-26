@@ -13,6 +13,9 @@ services:
       - KURDISH_TTS_API_KEY=${KURDISH_TTS_API_KEY:-}
       - KURDISH_TTS_STT_KEY=${KURDISH_TTS_STT_KEY:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - WARM_BULK_KEY=${WARM_BULK_KEY:-}
+      - NIGHT_WINDOW=${NIGHT_WINDOW:-22:00-07:00}
+      - NIGHT_TZ=${NIGHT_TZ:-Europe/Berlin}
     volumes:
       - tts-cache:/app/cache
     restart: unless-stopped

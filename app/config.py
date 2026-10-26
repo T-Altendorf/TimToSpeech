@@ -31,3 +31,11 @@ CORS_ORIGINS = [
     for origin in os.getenv("CORS_ORIGINS", "*").split(",")
     if origin.strip()
 ]
+
+# The night lane (`app/night.py`): bulk warming on the free endpoint inside a
+# nightly window. `NIGHT_WINDOW` is HH:MM-HH:MM in `NIGHT_TZ`, or `always`.
+NIGHT_WINDOW = os.getenv("NIGHT_WINDOW", "22:00-07:00").strip()
+NIGHT_TZ = os.getenv("NIGHT_TZ", "Europe/Berlin").strip()
+
+# Bearer key for POST/GET /warm/bulk; unset, the endpoint answers 503.
+WARM_BULK_KEY = os.getenv("WARM_BULK_KEY", "").strip()

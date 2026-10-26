@@ -19,6 +19,11 @@ The job's urgency event reaches the synthesis code through a context
 variable (`urgency()`), so the chunk functions keep their signatures; chunk
 threads get it through `carried`. No event at all (a direct call, a test)
 means unpaced, exactly as before the lanes.
+
+A third lane, `night` (`app/night.py`), runs bulk warming inside a nightly
+window on the free endpoint only: its jobs carry a night flag beside the
+urgency event, and `free_only()` tells the synthesis code never to fall to
+the paid endpoint. A tap on a night job makes it a tap like any other.
 """
 import contextvars
 import threading
@@ -32,6 +37,7 @@ from .config import log
 
 TAP = "tap"
 WARM = "warm"
+NIGHT = "night"
 
 # Workers that drain the warm queue. Each job may still split into parallel
 # chunks of its own; the bucket, not this number, keeps the free endpoint calm.
@@ -46,6 +52,7 @@ FREE_BUCKET_CAPACITY = 2
 FREE_REFILL_INTERVAL_S = 16.0
 
 _urgency: contextvars.ContextVar = contextvars.ContextVar("tts_job_urgency", default=None)
+_night: contextvars.ContextVar = contextvars.ContextVar("tts_job_night", default=False)
 
 
 def urgency() -> threading.Event | None:
@@ -57,28 +64,38 @@ def is_urgent(event: threading.Event | None) -> bool:
     return event is not None and event.is_set()
 
 
+def free_only() -> bool:
+    """A night job no tap has reached: never the paid endpoint."""
+    return _night.get() and not is_urgent(urgency())
+
+
 def lane_name(event: threading.Event | None) -> str:
     if event is None:
         return "direct"
-    return TAP if event.is_set() else WARM
+    if event.is_set():
+        return TAP
+    return NIGHT if _night.get() else WARM
 
 
 @contextmanager
-def bound(event: threading.Event | None):
+def bound(event: threading.Event | None, night: bool = False):
     """Run the block as the job that owns `event`."""
     token = _urgency.set(event)
+    night_token = _night.set(night)
     try:
         yield
     finally:
+        _night.reset(night_token)
         _urgency.reset(token)
 
 
 def carried(fn: Callable) -> Callable:
     """`fn`, run in another thread as the job calling this (chunk workers)."""
     event = urgency()
+    night = _night.get()
 
     def run(*args):
-        with bound(event):
+        with bound(event, night):
             return fn(*args)
 
     return run
@@ -138,6 +155,7 @@ class Job:
     urgent: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)
     state: str = "queued"  # queued, running
+    lane: str = WARM  # the lane it was submitted on; a tap only sets `urgent`
 
 
 class Jobs:
@@ -158,7 +176,7 @@ class Jobs:
                 if lane == TAP:
                     self._promote(job)
                 return job, False
-            job = Job(job_id, key, work)
+            job = Job(job_id, key, work, lane=lane)
             self.by_key[key] = job
             if lane == TAP:
                 self._start_now(job)
@@ -198,9 +216,26 @@ class Jobs:
                 job.state = "running"
             self._run(job)
 
+    def run_here(self, key: tuple, job_id: str, work: Callable) -> bool:
+        """Runs a night job in the calling thread, registered so a tap or warm
+        request for the same text joins it. False, and nothing run, when a
+        job for `key` is already here."""
+        with self.cond:
+            if key in self.by_key:
+                return False
+            job = Job(job_id, key, work, state="running", lane=NIGHT)
+            self.by_key[key] = job
+        self._run(job)
+        return True
+
+    def busy(self) -> bool:
+        """Whether any tap or warm job is queued or running."""
+        with self.cond:
+            return bool(self.queue) or any(job.lane != NIGHT for job in self.by_key.values())
+
     def _run(self, job: Job) -> None:
         try:
-            with bound(job.urgent):
+            with bound(job.urgent, job.lane == NIGHT):
                 job.work(job.job_id)
         except Exception as error:
             log(f"✗ Job {job.job_id} raised: {error}")

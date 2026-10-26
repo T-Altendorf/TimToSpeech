@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import NamedTuple
 import numpy as np
 from pydub import AudioSegment
-from . import alignment, alignment_check, lanes, response_cache, voices
+from . import alignment, alignment_check, lanes, response_cache, upstream, voices
 from .config import log, KURDISH_TTS_API_KEY
 from .utils import AUDIO_VERSION, text_hash
 
@@ -254,6 +254,19 @@ def _rate_limit_headers(response) -> dict:
     return {name: value for name, value in headers.items() if name.lower().startswith(wanted)}
 
 
+def _post_counted(endpoint: str, url: str, **kwargs):
+    """`requests.post`, its answer (or its absence) counted for `/health`."""
+    try:
+        response = requests.post(url, **kwargs)
+    except requests.exceptions.RequestException:
+        upstream.UPSTREAM.record(endpoint, None)
+        raise
+    status = getattr(response, "status_code", 200)
+    headers = _rate_limit_headers(response) if status == HTTP_TOO_MANY_REQUESTS else None
+    upstream.UPSTREAM.record(endpoint, status, headers)
+    return response
+
+
 def _post_free(payload: dict, delays: tuple = FREE_RETRY_DELAYS_S):
     """One free request, retried on a 429 with the bounded backoff above.
 
@@ -262,11 +275,12 @@ def _post_free(payload: dict, delays: tuple = FREE_RETRY_DELAYS_S):
     In a job (`app/lanes.py`) each request first takes a bucket token, and
     the backoff waits on the job's urgency event: a tap job, or a warm one a
     tap upgraded, stops retrying and raises, so its chunk goes paid now.
+    Every answer is counted in `app/upstream.py`.
     """
     urgent = lanes.urgency()
     for delay in (*delays, None):
         lanes.FREE_BUCKET.take(urgent)
-        response = requests.post(FREE_URL, json=payload, timeout=REQUEST_TIMEOUT, stream=True)
+        response = _post_counted(upstream.FREE, FREE_URL, json=payload, timeout=REQUEST_TIMEOUT, stream=True)
         if response.status_code != HTTP_TOO_MANY_REQUESTS:
             response.raise_for_status()
             return response
@@ -365,8 +379,8 @@ def _fetch_paid_body(text: str, voice: str, attempt: int = 0) -> dict:
         "model_version": voices.model_version(voice),
         "include_timestamps": True,
     }
-    response = requests.post(
-        PAID_URL, json=payload, headers={"x-api-key": KURDISH_TTS_API_KEY}, timeout=REQUEST_TIMEOUT
+    response = _post_counted(
+        upstream.PAID, PAID_URL, json=payload, headers={"x-api-key": KURDISH_TTS_API_KEY}, timeout=REQUEST_TIMEOUT
     )
     response.raise_for_status()
     response_cache.write(text, endpoint, response.content, "application/json", variant)
@@ -603,12 +617,13 @@ def _paid_chunk(index: int, text: str, voice: str, attempt: int = 0) -> ChunkAud
 def _free_chunk(index: int, text: str, voice: str, attempt: int = 0) -> ChunkAudio:
     """The free endpoint; when it stays rate-limited, the paid one if it can.
 
-    A check retry (`attempt` above 0) never falls through: it gives up.
+    A check retry (`attempt` above 0) never falls through: it gives up, and
+    so does a night job (`lanes.free_only`), which never asks the paid one.
     """
     try:
         result = _synthesize_free(text, voice, attempt) if attempt else _synthesize_free(text, voice)
     except RateLimited:
-        if attempt or not (KURDISH_TTS_API_KEY and voices.accepts_paid(voice)):
+        if attempt or lanes.free_only() or not (KURDISH_TTS_API_KEY and voices.accepts_paid(voice)):
             raise
         log(f"  chunk {index + 1}: free endpoint rate-limited, asking the authenticated one")
         return _paid_chunk(index, text, voice)
@@ -781,6 +796,8 @@ def call_kurdish_tts_api(
         log(f"✗ Kurdish TTS API failed: {str(e)} | Time: {elapsed:.3f}s")
         return False
     except Exception as e:
+        if isinstance(e, RateLimited) and lanes.free_only():
+            raise  # the night lane waits a 429 out and asks again later
         elapsed = time.perf_counter() - start_time
         log(f"✗ Unexpected error in Kurdish TTS API: {str(e)} | Time: {elapsed:.3f}s")
         traceback.print_exc()
