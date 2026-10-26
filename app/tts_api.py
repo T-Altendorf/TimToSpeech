@@ -267,17 +267,20 @@ def _post_counted(endpoint: str, url: str, **kwargs):
     return response
 
 
-def _post_free(payload: dict, delays: tuple = FREE_RETRY_DELAYS_S):
+def _post_free(payload: dict, delays: tuple = FREE_RETRY_DELAYS_S, hurry: bool = False):
     """One free request, retried on a 429 with the bounded backoff above.
 
     Raises `RateLimited` once every retry was answered 429; any other error
     status raises as before. A check retry passes no delays: one 429 raises.
-    In a job (`app/lanes.py`) each request first takes a bucket token, and
-    the backoff waits on the job's urgency event: a tap job, or a warm one a
-    tap upgraded, stops retrying and raises, so its chunk goes paid now.
-    Every answer is counted in `app/upstream.py`.
+    In a job (`app/lanes.py`) each request first takes a bucket token (a tap
+    never waits for one). `hurry` says the chunk has a paid fallback
+    (`_paid_fallback`): then the backoff waits on the job's urgency event, and
+    a tap job, or a warm one a tap upgraded, stops retrying and raises, so its
+    chunk goes paid now. Without one, a tap sits out the full backoff too:
+    raising would only lose the clip. Every answer is counted in `app/upstream.py`.
     """
     urgent = lanes.urgency()
+    hurried = urgent if hurry else None
     for delay in (*delays, None):
         lanes.FREE_BUCKET.take(urgent)
         response = _post_counted(upstream.FREE, FREE_URL, json=payload, timeout=REQUEST_TIMEOUT, stream=True)
@@ -286,12 +289,12 @@ def _post_free(payload: dict, delays: tuple = FREE_RETRY_DELAYS_S):
             return response
         log(f"  free endpoint 429 ({lanes.lane_name(urgent)}), headers: {_rate_limit_headers(response)}")
         response.close()
-        if delay is None or lanes.is_urgent(urgent):
+        if delay is None or lanes.is_urgent(hurried):
             break
         log(f"  free endpoint rate-limited (429), asking again in {delay}s")
-        if urgent is None:
+        if hurried is None:
             time.sleep(delay)
-        elif urgent.wait(delay):
+        elif hurried.wait(delay):
             break
     raise RateLimited(f"free endpoint still rate-limited after {len(delays)} retries")
 
@@ -311,7 +314,8 @@ def _fetch_free_lines(text: str, voice: str, attempt: int = 0) -> list:
         "model_version": voices.model_version(voice),
         "stream_format": "sse",
     }
-    response = _post_free(payload, FREE_RETRY_DELAYS_S if attempt == 0 else ())
+    delays = FREE_RETRY_DELAYS_S if attempt == 0 else ()
+    response = _post_free(payload, delays, hurry=_paid_fallback(voice, attempt))
     raw_lines = [line.decode("utf-8") for line in response.iter_lines() if line]
     response_cache.write(
         text, endpoint, "\n".join(raw_lines).encode("utf-8"), "text/event-stream", variant
@@ -614,6 +618,14 @@ def _paid_chunk(index: int, text: str, voice: str, attempt: int = 0) -> ChunkAud
     )
 
 
+def _paid_fallback(voice: str, attempt: int = 0) -> bool:
+    """Whether a rate-limited free chunk could go to the paid endpoint once
+    its job is urgent: not a check retry, a key set and a voice the paid one
+    accepts (`voices.accepts_paid`; no v5 voice does). A night job no tap has
+    reached still never asks it (`lanes.free_only`, in `_free_chunk`)."""
+    return not attempt and bool(KURDISH_TTS_API_KEY and voices.accepts_paid(voice))
+
+
 def _free_chunk(index: int, text: str, voice: str, attempt: int = 0) -> ChunkAudio:
     """The free endpoint; when it stays rate-limited, the paid one if it can.
 
@@ -623,7 +635,7 @@ def _free_chunk(index: int, text: str, voice: str, attempt: int = 0) -> ChunkAud
     try:
         result = _synthesize_free(text, voice, attempt) if attempt else _synthesize_free(text, voice)
     except RateLimited:
-        if attempt or lanes.free_only() or not (KURDISH_TTS_API_KEY and voices.accepts_paid(voice)):
+        if lanes.free_only() or not _paid_fallback(voice, attempt):
             raise
         log(f"  chunk {index + 1}: free endpoint rate-limited, asking the authenticated one")
         return _paid_chunk(index, text, voice)

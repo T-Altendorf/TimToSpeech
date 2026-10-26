@@ -4,6 +4,7 @@ warming; warm requests share one paced queue; one job per text and voice.
 Run with `python -m unittest` from the repo root.
 """
 
+import base64
 import sys
 import tempfile
 import threading
@@ -20,7 +21,7 @@ if "app.tts_local" not in sys.modules:
     stub.tokenizer = None
     sys.modules["app.tts_local"] = stub
 
-from app import alignment, lanes, utils, voices  # noqa: E402
+from app import alignment, lanes, response_cache, utils, voices  # noqa: E402
 from app import main as app_main  # noqa: E402
 from app import tts_api as t  # noqa: E402
 
@@ -38,6 +39,17 @@ class _Ok:
 
     def raise_for_status(self):
         pass
+
+
+class _Audio(_Ok):
+    """A free answer with 50 ms of silence in its SSE stream."""
+
+    def iter_lines(self):
+        pcm = base64.b64encode(b"\x00\x00" * 1102).decode()
+        return iter([('data: {"type": "speech.audio.delta", "audio": "%s"}' % pcm).encode(), b"data: [DONE]"])
+
+
+V5 = "studio_elder_m"
 
 
 class _RecordingEvent(threading.Event):
@@ -72,6 +84,7 @@ class _Unpaced(unittest.TestCase):
         for patcher in [
             mock.patch.object(utils, "CACHE_DIR", Path(tmp.name)),
             mock.patch.object(alignment, "ALIGNMENT_DIR", Path(tmp.name) / "alignments"),
+            mock.patch.object(response_cache, "RESPONSE_CACHE_DIR", Path(tmp.name) / "responses"),
         ]:
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -92,20 +105,22 @@ class FreeRequestLaneTest(_Unpaced):
         paid.assert_called_once_with("silav", voices.DEFAULT_VOICE)
         self.assertEqual(chunk.endpoint, "paid")
 
-    def test_a_tap_without_a_key_raises_as_before(self):
+    def test_a_tap_without_a_key_sits_out_the_backoff_then_raises(self):
         tap = threading.Event()
         tap.set()
         with mock.patch.object(t.requests, "post", return_value=_Limited()), \
+                mock.patch.object(t.time, "sleep") as sleep, \
                 mock.patch.object(t, "KURDISH_TTS_API_KEY", None), \
                 lanes.bound(tap):
             with self.assertRaises(t.RateLimited):
                 t._free_chunk(0, "silav", voices.DEFAULT_VOICE)
+        self.assertEqual(sleep.call_count, len(t.FREE_RETRY_DELAYS_S))
 
     def test_a_warm_429_backs_off_as_before(self):
         warm = _RecordingEvent()
         replies = [_Limited(), _Limited(), _Ok()]
         with mock.patch.object(t.requests, "post", side_effect=replies) as post, lanes.bound(warm):
-            t._post_free({})
+            t._post_free({}, hurry=True)
         self.assertEqual(post.call_count, 3)
         self.assertEqual(warm.waits, list(t.FREE_RETRY_DELAYS_S[:2]))
 
@@ -120,6 +135,68 @@ class FreeRequestLaneTest(_Unpaced):
         self.assertEqual(upgraded.waits, [t.FREE_RETRY_DELAYS_S[0]])
         paid.assert_called_once()
         self.assertEqual(chunk.endpoint, "paid")
+
+    def test_a_tap_on_a_v5_voice_sits_out_the_backoff_and_plays(self):
+        tap = threading.Event()
+        tap.set()
+        replies = [_Limited(), _Limited(), _Audio()]
+        with mock.patch.object(t.requests, "post", side_effect=replies) as post, \
+                mock.patch.object(t.time, "sleep") as sleep, \
+                mock.patch.object(t, "_synthesize_paid") as paid, \
+                mock.patch.object(t, "KURDISH_TTS_API_KEY", "a-key"), \
+                lanes.bound(tap):
+            chunk = t._free_chunk(0, "silav", V5)
+        self.assertEqual(post.call_count, 3)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], list(t.FREE_RETRY_DELAYS_S[:2]))
+        paid.assert_not_called()
+        self.assertEqual(chunk.endpoint, "free")
+        self.assertGreater(len(chunk.audio), 0)
+
+    def test_a_tap_on_a_v5_voice_still_raises_after_the_whole_backoff(self):
+        tap = threading.Event()
+        tap.set()
+        with mock.patch.object(t.requests, "post", return_value=_Limited()) as post, \
+                mock.patch.object(t.time, "sleep") as sleep, \
+                mock.patch.object(t, "KURDISH_TTS_API_KEY", "a-key"), \
+                lanes.bound(tap):
+            with self.assertRaises(t.RateLimited):
+                t._free_chunk(0, "silav", V5)
+        self.assertEqual(post.call_count, len(t.FREE_RETRY_DELAYS_S) + 1)
+        self.assertEqual(sleep.call_count, len(t.FREE_RETRY_DELAYS_S))
+
+    def test_an_upgraded_warm_job_on_a_v5_voice_keeps_its_backoff(self):
+        upgraded = _RecordingEvent(tap_during_wait=True)
+        replies = [_Limited(), _Limited(), _Audio()]
+        with mock.patch.object(t.requests, "post", side_effect=replies) as post, \
+                mock.patch.object(t.time, "sleep") as sleep, \
+                mock.patch.object(t, "_synthesize_paid") as paid, \
+                mock.patch.object(t, "KURDISH_TTS_API_KEY", "a-key"), \
+                lanes.bound(upgraded):
+            upgraded.set()
+            chunk = t._free_chunk(0, "silav", V5)
+        self.assertEqual(post.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(upgraded.waits, [])
+        paid.assert_not_called()
+        self.assertEqual(chunk.endpoint, "free")
+
+    def test_a_warm_job_on_a_v5_voice_upgraded_while_asleep_keeps_asking_free(self):
+        warm = _RecordingEvent()
+        replies = [_Limited(), _Audio()]
+
+        def tap_arrives(delay):
+            warm.set()
+
+        with mock.patch.object(t.requests, "post", side_effect=replies) as post, \
+                mock.patch.object(t.time, "sleep", side_effect=tap_arrives) as sleep, \
+                mock.patch.object(t, "_synthesize_paid") as paid, \
+                mock.patch.object(t, "KURDISH_TTS_API_KEY", "a-key"), \
+                lanes.bound(warm):
+            chunk = t._free_chunk(0, "silav", V5)
+        self.assertEqual(post.call_count, 2)
+        sleep.assert_called_once_with(t.FREE_RETRY_DELAYS_S[0])
+        paid.assert_not_called()
+        self.assertEqual(chunk.endpoint, "free")
 
     def test_a_check_retry_in_a_warm_job_still_gives_up_on_one_429(self):
         warm = _RecordingEvent()

@@ -22,6 +22,8 @@ class Voice(NamedTuple):
     # rate-limited free request may fall through to it and a sentence over the
     # free limit may go there. Checked by one real request per voice
     # (2026-10-02): v5 answered 403 "TTS v5 requires a paid API plan".
+    # Rechecked 2026-10-26: still 403 for every v5 voice, 200 for v4, so a
+    # tap on a v5 voice sits out the free backoff (`tts_api._post_free`).
     paid: bool
 
 
